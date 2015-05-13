@@ -1,0 +1,403 @@
+<?php
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+chdir("..");
+include_once("webtask.php");
+include_once("geni_defs.php");
+chdir("apt");
+include_once("profile_defs.php");
+include_once("instance_defs.php");
+
+#
+# Return clone status.
+#
+function Do_CloneStatus()
+{
+    global $this_user;
+    global $ajax_args;
+
+    $this_idx = $this_user->uid_idx();
+
+    if (!isset($ajax_args["uuid"])) {
+	SPITAJAX_ERROR(1, "Missing profile uuid");
+	return;
+    }
+    $profile = Profile::Lookup($ajax_args["uuid"]);
+    if (!$profile) {
+	SPITAJAX_ERROR(1, "Unknown profile uuid");
+	return;
+    }
+    if ($this_idx != $profile->creator_idx() && !ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not enough permission");
+	return;
+    }
+    $webtask = WebTask::LookupByObject($profile->uuid());
+    if (!$webtask) {
+	SPITAJAX_ERROR(1, "No status descriptor found");
+	return;
+    }
+    $taskdata = $webtask->TaskData();
+    $blob = array();
+
+    if ($webtask->exited()) {
+	# Success, but not sure what to report. Come back to this later.
+	$blob["exited"]   = $webtask->exited();
+	$blob["exitcode"] = $webtask->exitcode();
+    }
+    #
+    # Size is in KB to avoid bigint problems. But kill the KB.
+    # 
+    if (isset($taskdata["image_size"])) {
+	if (preg_match("/^(\d+)KB$/", $taskdata["image_size"], $matches)) {
+	    $taskdata["image_size"] = $matches[1]; 
+	}
+	$blob["image_size"] = $taskdata["image_size"];
+    }
+    else {
+	$blob["image_size"] = 0;
+    }
+    $blob["node_status"]  = $taskdata["rawstate"];
+    $blob["image_status"] = $taskdata["image_status"];
+    
+    SPITAJAX_RESPONSE($blob);
+}
+
+#
+# Delete a profile. The backend tells us if its allowed, and we
+# report back to user. If successful. tell the client where to
+# redirect to (previous profile).
+#
+function Do_DeleteProfile()
+{
+    global $this_user;
+    global $ajax_args;
+    global $suexec_output, $suexec_output_array;
+    
+    $this_idx = $this_user->uid_idx();
+    $this_uid = $this_user->uid();
+
+    if (!isset($ajax_args["uuid"])) {
+	SPITAJAX_ERROR(1, "Missing profile uuid");
+	return;
+    }
+    $profile = Profile::Lookup($ajax_args["uuid"]);
+    if (!$profile) {
+	SPITAJAX_ERROR(1, "Unknown profile uuid");
+	return;
+    }
+    if ($this_idx != $profile->creator_idx() && !ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not enough permission");
+	return;
+    }
+    if (!$profile->IsHead()) {
+	SPITAJAX_ERROR(1, "Not allowed to delete non-head version");
+	return;
+    }
+    if ($profile->published() && !ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not allowed to delete a published version");
+	return;
+    }
+    #
+    # Invoke backend.
+    #
+    $retval = SUEXEC($this_uid, $profile->pid(),
+		     "webmanage_profile delete " . $profile->uuid(),
+		     SUEXEC_ACTION_CONTINUE);
+    if ($retval != 0) {
+	$error = "Transient error; please try again later";
+	
+	if ($retval && count($suexec_output_array)) {
+	    $error = $suexec_output_array[0];
+	}
+	SPITAJAX_ERROR(1, $error);
+	return;
+    }
+    # Lookup next most recent version
+    $profile = Profile::Lookup($profile->profileid());
+    if (!$profile) {
+	#
+	# Go back to myprofiles page instead. Happens when last version
+	# is deleted. 
+	#
+	SPITAJAX_RESPONSE("myprofiles.php");
+	return;
+    }
+    $uuid = $profile->uuid();
+    SPITAJAX_RESPONSE("manage_profile.php?uuid=$uuid&action=edit");
+}
+
+#
+# Publish a profile. The backend tells us if its allowed, and we
+# report back to user. If successful. tell the client where to
+# redirect to (previous profile).
+#
+function Do_PublishProfile()
+{
+    global $this_user;
+    global $ajax_args;
+    global $suexec_output, $suexec_output_array;
+    
+    $this_idx = $this_user->uid_idx();
+    $this_uid = $this_user->uid();
+
+    if (!isset($ajax_args["uuid"])) {
+	SPITAJAX_ERROR(1, "Missing profile uuid");
+	return;
+    }
+    $profile = Profile::Lookup($ajax_args["uuid"]);
+    if (!$profile) {
+	SPITAJAX_ERROR(1, "Unknown profile uuid");
+	return;
+    }
+    if ($this_idx != $profile->creator_idx() && !ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not enough permission");
+	return;
+    }
+    if ($profile->published()) {
+	SPITAJAX_ERROR(1, "Not allowed to publish a published version");
+	return;
+    }
+    if (!$profile->IsHead()) {
+	SPITAJAX_ERROR(1, "Not allowed to publish non-head version");
+	return;
+    }
+    #
+    # Invoke backend.
+    #
+    $retval = SUEXEC($this_uid, $profile->pid(),
+		     "webmanage_profile publish " . $profile->uuid(),
+		     SUEXEC_ACTION_CONTINUE);
+    if ($retval != 0) {
+	$error = "Transient error; please try again later";
+	
+	if ($retval && count($suexec_output_array)) {
+	    $error = $suexec_output_array[0];
+	}
+	SPITAJAX_ERROR(1, $error);
+	return;
+    }
+    $profile->Refresh();
+    SPITAJAX_RESPONSE(array("published" => $profile->published()));
+}
+
+#
+# Instantiate as Guest user. Simply a convenience, users could do
+# this themselves.
+#
+# Note that this is going to log the user out. Big simplification,
+# big headache otherwise. 
+#
+function Do_GuestInstantiate()
+{
+    global $this_user;
+    global $ajax_args;
+    
+    $this_idx = $this_user->uid_idx();
+
+    if (!isset($ajax_args["uuid"])) {
+	SPITAJAX_ERROR(1, "Missing profile uuid");
+	return;
+    }
+    $profile = Profile::Lookup($ajax_args["uuid"]);
+    if (!$profile) {
+	SPITAJAX_ERROR(1, "Unknown profile uuid");
+	return;
+    }
+    if ($this_idx != $profile->creator_idx() && !ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not enough permission");
+	return;
+    }
+
+    #
+    # Need to form a guest id. Ideally, lets look for a guest user
+    # with the same email and use that. 
+    #
+    $geniuser = GeniUser::LookupByEmail("sa", $this_user->email());
+    if ($geniuser) {
+	$guestid = $geniuser->uid();
+	$token   = $geniuser->auth_token();
+    }
+    else {
+	$guestid = "g" . substr(GENHASH(), 0, 6);
+	$token   = substr(GENHASH(), 0, 16);
+    }
+    $args = array();
+    $args["username"]   = $guestid;
+    $args["email"]      = $this_user->email();
+    $args["profile"]    = $profile->uuid();
+    $args["auth_token"] = $token;
+
+    # Grab first internal (encrypted) ssh key and use it.
+    $query_result =
+	DBQueryWarn("select pubkey from user_pubkeys ".
+		    "where uid_idx='$this_idx' and internal=0 limit 1");
+    if (mysql_num_rows($query_result)) {
+	$row = mysql_fetch_array($query_result);
+	$args["sshkey"] = $row[0];
+    }
+    
+    #
+    # Need to log the user out. 
+    #
+    DBQueryFatal("delete from login where uid_idx='$this_idx'");
+
+    #
+    # Invoke the backend.
+    #
+    $errors = array();
+    list ($instance, $creator) =
+	Instance::Instantiate(NULL, "", $args, $errors);
+
+    if (!$instance) {
+	SPITAJAX_ERROR(1, $errors["error"]);
+    }
+    #
+    # Return the cookies the clients needs to set, so that it can load
+    # the status page. 
+    #
+    SPITAJAX_RESPONSE(array("quickvm_user"    => $creator->uuid(),
+			    "quickvm_id"      => $guestid,
+			    "quickvm_uuid"    => $instance->uuid(),
+			    'quickvm_authkey' => $creator->auth_token()));
+}
+
+#
+# Instantiate profile (as the user)
+#
+function Do_Instantiate()
+{
+    global $this_user, $am_array;
+    global $ajax_args;
+    
+    $this_idx = $this_user->uid_idx();
+
+    if (!isset($ajax_args["uuid"])) {
+	SPITAJAX_ERROR(1, "Missing profile uuid");
+	return;
+    }
+    $profile = Profile::Lookup($ajax_args["uuid"]);
+    if (!$profile) {
+	SPITAJAX_ERROR(1, "Unknown profile uuid");
+	return;
+    }
+    if ($this_idx != $profile->creator_idx() && !ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not enough permission");
+	return;
+    }
+
+    $args = array();
+    $args["username"]   = $this_user->uid();
+    $args["email"]      = $this_user->email();
+    $args["profile"]    = $profile->uuid();
+    $args["auth_token"] = $token;
+
+    $opts = "";
+    if (ISADMIN() && isset($ajax_args["where"])) {
+	if (array_key_exists($ajax_args["where"], $am_array)) {
+	    $opts = "-a " . $am_array[$ajax_args["where"]];
+	}
+	else {
+	    SPITAJAX_ERROR(1, "Invalid Aggregate");
+	    return;
+	}
+    }
+
+    #
+    # Invoke the backend.
+    #
+    $errors = array();
+    list ($instance, $creator) =
+	Instance::Instantiate($this_user, $opts, $args, $errors);
+
+    if (!$instance) {
+	SPITAJAX_ERROR(1, $errors["error"]);
+    }
+    #
+    # Return the instance uuid so we can redirect user to the status page.
+    #
+    SPITAJAX_RESPONSE(array("quickvm_uuid"    => $instance->uuid()));
+}
+
+#
+# Run a geni-lib script, returning the XML.
+#
+function Do_CheckScript()
+{
+    global $this_user;
+    global $ajax_args;
+    
+    $this_idx = $this_user->uid_idx();
+    $this_uid = $this_user->uid();
+
+    #
+    # Only local users for now, not users whose accounts were created
+    # by geni-login. Not until we have proper sandboxing while running
+    # the geni-lib code.
+    #
+    if ($this_user->IsNonLocal()) {
+	SPITAJAX_ERROR(1, "You are not allowed to use geni-lib scripts.");
+	return;
+    }
+
+    if (!isset($ajax_args["script"])) {
+	SPITAJAX_ERROR(1, "Missing script");
+	return;
+    }
+    $infname  = tempnam("/tmp", "genilibin");
+    $outfname = tempnam("/tmp", "genilibout");
+
+    $fp = fopen($infname, "w");
+    fwrite($fp, $ajax_args["script"]);
+    fclose($fp);
+    chmod($infname, 0666);
+    chmod($outfname, 0666);
+
+    #
+    # Invoke the backend.
+    #
+    $retval = SUEXEC($this_uid, "nobody",
+		     "webrungenilib -o $outfname $infname",
+		     SUEXEC_ACTION_IGNORE);
+    
+    if ($retval != 0) {
+	if ($retval < 0) {
+	    SUEXECERROR(SUEXEC_ACTION_CONTINUE);
+	    SPITAJAX_ERROR(-1, "Internal error, we have been notified");
+	}
+	else {
+	    $errors = file_get_contents($outfname);
+	    SPITAJAX_ERROR(1, $errors);
+	}
+    }
+    else {
+	$rspec = file_get_contents($outfname);
+	SPITAJAX_RESPONSE(array("rspec"  => $rspec));
+    }
+    unlink($infname);
+    unlink($outfname);
+}
+
+# Local Variables:
+# mode:php
+# End:
+?>

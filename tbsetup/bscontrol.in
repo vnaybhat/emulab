@@ -1,0 +1,839 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2013-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use strict;
+use English;
+use Getopt::Std;
+
+#
+# Block storage server control utility.
+#
+# Contacts one or all available block storage servers to perform actions.
+# Commands:
+#
+# bscontrol list
+#	List all configured blockstore servers.
+#
+# bscontrol [ -S server [ -P pool ] ] avail
+#	For the named servers (or all if none specified), print out
+#	how much storage is available.
+#
+# bscontrol [ -S server [ -P pool ] ] info
+#	Return detailed info the listed block servers (or all) including the
+#	name of all existant blockstores and their sizes, attributes, etc.
+#
+# The following commands are for persistent blockstores.
+# For these, a blockstore name, "bsname", had better be unique.
+#
+# bscontrol [ -S server [ -P pool ] ] [-l leaseidx] [-f fstype] -s size -t type create bsname
+#	Create a blockstore of the given size with the given name.
+#	If the server is not specified, we pick the "best" server,
+#	based on availability of space.
+#
+# bscontrol destroy [ -S server -P pool ] bsname
+#	Destroy the named blockstore freeing up the space.
+#	Here bsname needs to be unique across all servers
+#	or the server and pool need to be explicitly specified.
+#
+# bscontrol [ -S server [ -P pool ] ] copy from-bsname to-bsname
+#	Do an efficient copy of one blockstore to another. Use the
+#	server/pool arguments to force a specific placement of to-bsname.
+#
+sub usage()
+{
+    print STDERR "Usage: bscontrol command args\n";
+    print STDERR "   -h       This message\n";
+    print STDERR "   -d       Print additional debug info\n";
+    print STDERR "commands:\n";
+    print STDERR "   list     List all blockstore servers\n";
+    print STDERR "   avail    For each server, show available storage\n";
+    print STDERR "   info     For each server, show all extant volumes\n";
+    exit(-1);
+}
+my $optlist  = "hds:t:l:S:P:Ff:";
+my $debug = 0;
+my $server;
+my $pool;
+my $size;
+my $type = "stdataset";
+my $leaseidx = 0;
+my $fstype = "";
+my $fakeit = 0;
+
+# Protos
+sub fatal($);
+sub bs_list($$$@);
+sub bs_avail($$$@);
+sub bs_info($$$@);
+sub bs_create($$$@);
+sub bs_destory($$$@);
+
+#
+# Configure variables
+#
+my $TB		 = "@prefix@";
+
+my $PROXYCMD	 = "/usr/local/etc/emulab/bscontrol.proxy";
+my $SSH		 = "ssh -n -o ConnectTimeout=2 -o Protocol=2 -o BatchMode=yes -o StrictHostKeyChecking=no";
+
+#
+# Testbed Support libraries
+#
+use lib "@prefix@/lib";
+use libdb;
+use emutil;
+use Lease;
+use Blockstore;
+use Experiment;
+use User;
+use Project;
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Untaint the path
+# 
+$ENV{'PATH'} = "/bin:/sbin:/usr/bin:";
+
+#
+# We don't want to run this script unless its the real version.
+# That is, it must be setuid root. 
+#
+if ($EUID != 0) {
+    die("*** $0:\n".
+	"    Must be root! Maybe its a development version?\n");
+}
+
+# Commands
+my %cmds = (
+   "list"   => \&bs_list,
+   "avail"  => \&bs_avail,
+   "info"   => \&bs_info,
+   "create" => \&bs_create,
+   "destroy" => \&bs_destroy,
+);
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{h})) {
+    usage();
+}
+if (defined($options{d})) {
+    $debug = 1;
+}
+if (defined($options{S})) {
+    if ($options{S} =~ /^([-\w]+)$/) {
+	$server = $1;
+    }
+}
+if (defined($options{P})) {
+    $pool = $options{P};
+    if ($options{P} =~ /^([-\w]+)$/) {
+	$pool = $1;
+    }
+}
+if (defined($options{s})) {
+    if ($options{s} =~ /^(\d+)$/) {
+	$size = $1;
+    }
+}
+if (defined($options{t})) {
+    $type = $options{t};
+}
+if (defined($options{l})) {
+    $leaseidx = $options{l};
+}
+if (defined($options{f})) {
+    $fstype = $options{f};
+}
+if (defined($options{F})) {
+    $fakeit = 1;
+}
+if (@ARGV < 1) {
+    usage();
+}
+
+my $cmd = shift;
+if (!exists($cmds{$cmd})) {
+    print STDERR "Unrecognized command '$cmd', should be one of:\n";
+    print STDERR "  ", join(", ", keys %cmds), "\n";
+    usage();
+}
+
+$fakeit = 1
+    if (-e "$TB/etc/bs-servers.txt");
+if ($fakeit) {
+    print STDERR "WARNING: bscontrol operating in fake mode!\n";
+}
+
+exit(&{$cmds{$cmd}}($server, $pool, $size, @ARGV));
+
+#
+# Look in the database to find the storage servers
+#
+sub bsservers()
+{
+    my @bs = ();
+
+    if ($fakeit) {
+	if (-e "$TB/etc/bs-servers.txt") {
+	    foreach my $bs (`cat $TB/etc/bs-servers.txt`) {
+		# keep taint happy
+		if ($bs =~ /^([-\w]+)$/) {
+		    push @bs, $1;
+		}
+	    }
+	}
+	return @bs;
+    }
+
+    my $result =
+	DBQueryFatal("SELECT node_id FROM reserved WHERE erole='storagehost'".
+		     " order by node_id");
+    while (my ($node) = $result->fetchrow_array) {
+	push @bs, $node;
+    }
+    return @bs;
+}
+
+sub fake_change($$$)
+{
+    my ($file,$pool,$used) = @_;
+
+    my $line = `grep 'pool=$pool ' $file`;
+    if ($? == 0 && $line =~ /size=(\d+) avail=(\d+)/) {
+	my $size = $1;
+	my $oavail = $2;
+	my $navail = $oavail - $used;
+	if (system("sed -i '' -e 's/pool=$pool size=$size avail=$oavail/pool=$pool size=$size avail=$navail/' $file") == 0) {
+	    return 1;
+	}
+    }
+    return 0;
+}
+
+sub fake_cmd($$$)
+{
+    my ($host, $cmdstr, $outref) = @_;
+    my @output = ();
+
+    my ($fcmd,$fargs);
+    if ($cmdstr =~ /^$PROXYCMD\s+(\S+)(?:\s+(.*))?$/) {
+	$fcmd = $1;
+	$fargs = $2;
+    } else {
+	push @output, "Unrecognized command string '$cmdstr'";
+	$$outref = \@output;
+	return -1;
+    }
+    if ($fcmd =~ /^(volumes|pools)$/) {
+	if (-e "$TB/etc/bs-$fcmd-$host.txt") {
+	    @output = `cat $TB/etc/bs-$fcmd-$host.txt`;
+	    chomp @output;
+	}
+	$$outref = \@output;
+	return 0;
+    } elsif ($fcmd eq "create") {
+	# in format: create pool volume size
+	# out format: volume=lease-2 pool=rz-1 size=95
+	if ($fargs =~ /^(\S+)\s+(\S+)\s+(\S+)/) {
+	    my $pool = $1;
+	    my $vol = $2;
+	    my $size = $3;
+
+	    my $vfile = "$TB/etc/bs-volumes-$host.txt";
+	    my $pfile = "$TB/etc/bs-pools-$host.txt";
+	    system("cp -f $vfile $vfile.new");
+	    system("cp -f $pfile $pfile.new");
+
+	    system("echo 'volume=$vol pool=$pool size=$size' >> $vfile.new");
+
+	    if (fake_change("$pfile.new", $pool, $size) &&
+		rename($pfile, "$pfile.old") &&
+		rename("$pfile.new", $pfile) &&
+		rename($vfile, "$vfile.old") &&
+		rename("$vfile.new", $vfile)) {
+		$$outref = \@output;
+		return 0;
+	    }
+	}
+	push @output, "create $fargs failed!";
+	$$outref = \@output;
+	return -1;
+    } elsif ($fcmd eq "destroy") {
+	# in format: destroy pool volume
+	if ($fargs =~ /^(\S+)\s+(\S+)/) {
+	    my $pool = $1;
+	    my $volume = $2;
+	    my $size;
+
+	    my $vfile = "$TB/etc/bs-volumes-$host.txt";
+	    my $pfile = "$TB/etc/bs-pools-$host.txt";
+	    system("cp -f $vfile $vfile.new");
+	    system("cp -f $pfile $pfile.new");
+
+	    my $line = `grep 'volume=$volume pool=$pool' $vfile`;
+	    if ($line =~ /size=(\d+)/) {
+		$size = $1;
+		if (fake_change("$pfile.new", $pool, -$size) &&
+		    system("sed -i '' -e '/volume=$volume pool=$pool /d' $vfile.new") == 0 &&
+		rename($pfile, "$pfile.old") &&
+		rename("$pfile.new", $pfile) &&
+		rename($vfile, "$vfile.old") &&
+		rename("$vfile.new", $vfile)) {
+		    $$outref = \@output;
+		    return 0;
+		}
+	    }
+	}
+	push @output, "destroy $fargs failed!";
+	$$outref = \@output;
+	return -1;
+    } else {
+	push @output, "Cannot fake '$fcmd' right now";
+	$$outref = \@output;
+	return -1;
+    }
+}
+
+#
+# Execute a command on a remote blockstore server and return the output.
+#
+sub bsserver_cmd($$$)
+{
+    my ($host, $cmdstr, $outref) = @_;
+    my @output = ();
+    my $stat = 0;
+
+    if ($fakeit) {
+	print STDERR "Faking '$SSH $host $cmdstr'\n"
+	    if ($debug);
+	return fake_cmd($host, $cmdstr, $outref);
+    }
+
+    print STDERR "Doing '$SSH $host $cmdstr'\n"
+	if ($debug);
+
+    my $SAVEUID = $UID;
+    $UID = 0;
+    @output = `$SSH $host $cmdstr 2>&1`;
+    $UID = $SAVEUID;
+    if ($?) {
+	$stat = $? >> 8;
+	print STDERR "*** WARNING: ssh to $host failed ($stat)!\n";
+    }
+
+    print STDERR "Got output:\n", @output
+	if ($debug > 1);
+    chomp(@output);
+    $$outref = \@output;
+    return $stat;
+}
+
+sub parseattrs($)
+{
+    my ($line) = @_;
+    my %attrs = ();
+
+    foreach my $pair (split(/\s+/, $line)) {
+	if ($pair =~ /^(\S+)=(\S+)$/) {
+	    $attrs{$1} = $2;
+	}
+    }
+
+    return \%attrs;
+}
+
+#
+# Augment pool atrributes with Emulab blockstore attributes.
+#
+sub get_poolattrs($)
+{
+    my ($attrs) = @_;
+
+    my $server = $attrs->{'server'};
+    my $pool = $attrs->{'pool'};
+    my $bstore = Blockstore->Lookup($server, $pool);
+    if ($bstore) {
+	my $bsidx = $bstore->bsidx();
+	my $result =
+	    DBQueryFatal("SELECT attrvalue FROM blockstore_attributes ".
+			 "WHERE bsidx='$bsidx' and attrkey='allowed_bstores'");
+	if ($result && $result->numrows) {
+	    my ($allows) = $result->fetchrow_array;
+	    $attrs->{'allowed'} = $allows;
+	} else {
+	    # XXX if nothing specified, assume non-persistent blockstores
+	    $attrs->{'allowed'} = "volatile";
+	}
+    } else {
+	print STDERR "WARNING: no blockstore object for $server/$pool\n";
+    }
+
+    return $attrs;
+}
+
+#
+# Augment volume attributes with Emulab blockstore attributes gleaned
+# from the volume attributes.
+#
+sub get_bsattrs($)
+{
+    my ($attrs) = @_;
+
+    #
+    # iname info implies that the volume is exported via iSCSI
+    # Parse out good stuff like the iqn, pid, eid, and vname.
+    # Get even more good stuff from the experiment.
+    #
+    my $iname = $attrs->{'iname'};
+    if ($iname) {
+	my ($iqn,$pid,$eid,$vname) = split(':', $iname);
+
+	$attrs->{'iqn'} = $iqn;
+	$attrs->{'pid'} = $pid;
+	$attrs->{'eid'} = $eid;
+	$attrs->{'vname'} = $vname;
+	$attrs->{'uname'} = "$pid/$eid/$vname";
+	if (defined($pid) && defined($eid)) {
+	    my $expt;
+
+	    if (!($expt = Experiment->Lookup("$pid/$eid"))) {
+		print STDERR "WARNING: no experiment info associated with $pid/$eid\n";
+		$attrs->{'swapper'} = $attrs->{'owner'} = "??";
+	    } else {
+		$attrs->{'swapper'} = $expt->swapper();
+		$attrs->{'owner'} = $expt->creator();
+	    }
+	}
+	$attrs->{'active'} = 1;
+    } else {
+	$attrs->{'active'} = 0;
+    }
+
+    #
+    # If the volume name is of the form 'lease-<id>' then this
+    # is a persistent dataset. Extract more info from the lease.
+    # Note that attributes from the lease override those from a
+    # swapped in experiment using the lease (e.g., owner and uname).
+    #
+    my $volume = $attrs->{'volume'};
+    if ($volume =~ /^lease-(\d+)$/) {
+	my $lidx = $1;
+
+	$attrs->{'lidx'} = $lidx;
+	my $lease = Lease->Lookup($lidx);
+	if (!$lease) {
+	    print STDERR "WARNING: no lease info associated with persistent lease $lidx\n";
+	    $attrs->{'lid'} = $attrs->{'owner'} = $attrs->{'lpid'} =
+		$attrs->{'type'} = $attrs->{'expiration'} = "??";
+	    $attrs->{'uname'} = $volume;
+	} else {
+	    $attrs->{'lid'} = $lease->lease_id();
+	    $attrs->{'owner'} = $lease->owner();
+	    $attrs->{'lpid'} = $lease->pid();
+	    $attrs->{'type'} = $lease->type();
+	    $attrs->{'expiration'} = $lease->expiration();
+	    $attrs->{'uname'} = $attrs->{'lpid'} . "/" . $attrs->{'lid'};
+	}
+	$attrs->{'persist'} = 1;
+
+    } else {
+	$attrs->{'type'} = "volatile";
+	$attrs->{'persist'} = 0;
+    }
+
+    return $attrs;
+}
+
+sub getpools($$)
+{
+    my ($dsrv,$dpool) = @_;
+    my %pools = ();
+
+    foreach my $srv (bsservers()) {
+	next
+	    if (defined($dsrv) && $dsrv ne $srv);
+
+	my $outref;
+	if (bsserver_cmd($srv, "$PROXYCMD pools", \$outref) == 0) {
+	    foreach my $pstr (@$outref) {
+		my $attrs = parseattrs($pstr);
+		my $pool = $attrs->{'pool'};
+		if (!defined($dpool) || $dpool eq $pool) {
+		    $attrs->{'server'} = $srv;
+		    $attrs = get_poolattrs($attrs);
+		    $pools{"$srv/$pool"} = $attrs;
+		}
+	    }
+	} else {
+	    print STDERR "*** could not get pools from $srv, error:\n";
+	    foreach my $str (@$outref) {
+		print STDERR "  $str\n";
+	    }
+	}
+    }
+
+    return \%pools;
+}
+
+sub getvolumes($$)
+{
+    my ($dsrv,$dpool) = @_;
+    my %volumes = ();
+
+    foreach my $srv (bsservers()) {
+	next
+	    if (defined($dsrv) && $dsrv ne $srv);
+
+	my $outref;
+	if (bsserver_cmd($srv, "$PROXYCMD volumes", \$outref) == 0) {
+	    foreach my $vstr (@$outref) {
+		my $attrs = parseattrs($vstr);
+		my $pool = $attrs->{'pool'};
+		if (!defined($dpool) || $dpool eq $pool) {
+		    $attrs->{'server'} = $srv;
+		    my $vol = $attrs->{'volume'};
+		    $volumes{"$srv/$pool/$vol"} = $attrs;
+		}
+	    }
+	} else {
+	    print STDERR "*** could not get volumes from $srv, error:\n";
+	    foreach my $str (@$outref) {
+		print STDERR "  $str\n";
+	    }
+	}
+    }
+
+    return \%volumes;
+}
+
+sub getblockstores($$)
+{
+    my ($dsrv,$dpool) = @_;
+    my %bstores = ();
+
+    foreach my $srv (bsservers()) {
+	next
+	    if (defined($dsrv) && $dsrv ne $srv);
+
+	my $outref;
+	if (bsserver_cmd($srv, "$PROXYCMD volumes", \$outref) == 0) {
+	    foreach my $vstr (@$outref) {
+		my $attrs = get_bsattrs(parseattrs($vstr));
+		if (!defined($dpool) || $dpool eq $attrs->{'pool'}) {
+		    $attrs->{'server'} = $srv;
+
+		    if (!exists($attrs->{'uname'})) {
+			$attrs->{'uname'} = "NON-EMULAB/$srv-" .
+			    $attrs->{'pool'} . "-" . $attrs->{'volume'};
+			$attrs->{'type'} = "--";
+		    }
+
+		    $bstores{$attrs->{'uname'}} = $attrs;
+		}
+	    }
+	} else {
+	    print STDERR "*** could not get blockstores from $srv, error:\n";
+	    foreach my $str (@$outref) {
+		print STDERR "  $str\n";
+	    }
+	}
+    }
+
+    return \%bstores;
+}
+
+sub bs_list($$$@)
+{
+    foreach my $srv (bsservers()) {
+	print "$srv\n";
+    }
+}
+
+sub bs_avail($$$@)
+{
+    my ($dsrv,$dpool,undef) = @_;
+
+    my $poolref = getpools($dsrv, $dpool);
+
+    if (keys(%{$poolref}) > 0) {
+	printf("%-12s %-12s %10s %10s %-5s %-s\n",
+	       "Server", "Pool", "Size", "Avail", "Free %", "Allows");
+
+	foreach my $pstr (sort keys(%{$poolref})) {
+	    my $attrs = $poolref->{$pstr};
+	    my $size = ($attrs->{'size'} ? $attrs->{'size'} : 1);
+	    my $pct = $attrs->{'avail'} / $size * 100;
+	    printf("%-12s %-12s %10s %10s %5.1f %-s\n",
+		   $attrs->{'server'}, $attrs->{'pool'},
+		   $size, $attrs->{'avail'}, $pct, $attrs->{'allowed'});
+	}
+    }
+
+    return 0;
+}
+
+sub bs_info($$$@)
+{
+    my ($dsrv,$dpool,undef) = @_;
+
+    my $bsref = getblockstores($dsrv, $dpool);
+
+    if (keys(%{$bsref}) > 0) {
+	printf("%-32s %-24s %-10s %10s %-s\n",
+	       "Unique ID", "Server/Pool/Volume", "Type", "Size", "Exported as");
+
+	foreach my $bs (sort keys(%{$bsref})) {
+	    my $attrs = $bsref->{$bs};
+	    printf("%-32s %-24s %-10s %10s %s\n", $bs,
+		   $attrs->{'server'} . "/" . $attrs->{'pool'} . "/" . $attrs->{'volume'},
+		   $attrs->{'type'}, $attrs->{'size'},
+		   ($attrs->{'active'} ? $attrs->{'iname'} : ""));
+	}
+    }
+
+    return 0;
+}
+
+sub bs_create($$$@)
+{
+    my ($srv,$pool,$size,$name) = @_;
+
+    if (!defined($size)) {
+	fatal("create: must specify a size in MiB (-s)");
+    }
+    if (defined($name) && $name =~ /^([-\w]+)$/) {
+	$name = $1;
+    } else {
+	fatal("create: must specify a valid volume name");
+    }
+
+    if ($leaseidx !~ /^\d+$/) {
+	fatal("create: lease index must be an integer");
+    }
+    if ($fstype) {
+	if ($fstype !~ /^(ext2|ext3|ext4|ufs)$/) {
+	    fatal("create: fstype must be one of ext2|ext3|ext4|ufs");
+	} else {
+	    $fstype = $1;
+	}
+    }
+    if ($type !~ /^(st|lt)dataset$/) {
+	fatal("create: type must be either 'stdataset' or 'ltdataset'");
+    }
+
+    # get all qualified pools
+    my $poolref = getpools($srv, $pool);
+
+    if ($debug) {
+	print STDERR
+	    "create(", ($srv ? $srv : "-"), "/", ($pool ? $pool : "-"),
+	    ", $size, $name): found candidate pools:\n";
+	foreach my $pstr (sort keys(%{$poolref})) {
+	    my $attrs = $poolref->{$pstr};
+	    print STDERR "  ", $attrs->{'server'}, "/", $attrs->{'pool'},
+		": avail=", $attrs->{'avail'}, "\n";
+	}
+    }
+
+    # eliminate those without enough space or that don't allow the type
+    my %servercount = ();
+    my @pools = ();
+    foreach my $pstr (sort keys(%{$poolref})) {
+	my $attrs = $poolref->{$pstr};
+	if (!exists($servercount{$attrs->{'server'}})) {
+	    $servercount{$attrs->{'server'}} = 1;
+	} else {
+	    $servercount{$attrs->{'server'}}++;
+	}
+	if ($attrs->{'size'} >= $size &&
+	    $attrs->{'allowed'} =~ /$type/) {
+	    push(@pools, $attrs);
+	}
+    }
+
+    # if none qualify, quit
+    if (@pools == 0) {
+	if ($srv) {
+	    print STDERR "$srv: not enough space in ",
+	    ($pool ? "pool $pool" : "any pool"), "\n";
+	} else {
+	    print STDERR "No storage server has enough space\n";
+	}
+	exit(1);
+    }
+
+    #
+    # Pick the best pool if more than one:
+    #  - prefer pool with most available space
+    # XXX should take number of blockstores in each pool into account.
+    #
+    my $bpoolattrs;
+    foreach my $attrs (@pools) {
+	if (!$bpoolattrs || $attrs->{'avail'} > $bpoolattrs->{'avail'}) {
+	    $bpoolattrs = $attrs;
+	    next;
+	}
+    }
+
+    # we should have one, do some sanity checks
+    if (!$bpoolattrs) {
+	fatal("create: did not find a pool!?");
+    }
+    if ($srv) {
+	if ($srv ne $bpoolattrs->{'server'}) {
+	    fatal("create: found server is not the specified server!?");
+	}
+    } else {
+	$srv = $bpoolattrs->{'server'};
+    }
+
+    if ($pool) {
+	if ($pool ne $bpoolattrs->{'pool'}) {
+	    fatal("create: found pool is not the specified pool!?");
+	}
+    } else {
+	$pool = $bpoolattrs->{'pool'};
+    }
+
+    #
+    # Now we can begin the task of actually creating the blockstore!
+    # First, lookup the blockstore object for the underlying pool.
+    #
+    print STDERR "$name: size=$size, server=$srv, pool=$pool\n"
+	if ($debug);
+    my $bstore = Blockstore->Lookup($srv, $pool);
+    if (!$bstore) {
+	fatal("create: could not find blockstore for $srv:$pool");
+    }
+
+    #
+    # Create the new partition blockstore in the DB.
+    #
+    my $pbstore = $bstore->Partition($leaseidx, $name, $type, $size);
+    if (!$pbstore) {
+	fatal("create: could not create '$name' in DB");
+    }
+
+    # Call out to the server to allocate the actual storage.
+    my $outref;
+    if (bsserver_cmd($srv, "$PROXYCMD create $pool $name $size $fstype", \$outref)) {
+	$pbstore->Delete();
+	print STDERR "*** create: could not allocate storage for '$name' on $srv/$pool:";
+	foreach my $str (@$outref) {
+	    print STDERR "  $str\n";
+	}
+	exit(-1);
+    }
+
+    return 0;
+}
+
+sub bs_destroy($$$@)
+{
+    my ($srv,$pool,$size,$name) = @_;
+
+    if (defined($name) && $name =~ /^([-\w]+)$/) {
+	$name = $1;
+    } else {
+	fatal("create: must specify a valid volume name");
+    }
+
+    #
+    # Find the blockstore based on info from the server(s).
+    #
+    my $volattrs;
+    my $volref = getvolumes($srv, $pool);
+    foreach my $vol (sort keys(%{$volref})) {
+	my $attrs = $volref->{$vol};
+	if ($name eq $attrs->{'volume'}) {
+	    if ($volattrs) {
+		fatal("destroy: multiple volumes match '$name', specify a server and pool");
+	    }
+	    $volattrs = $attrs;
+	}
+    }
+    if (!$volattrs) {
+	fatal("destroy: no such volume '$name'");
+    }
+    if ($srv) {
+	if ($srv ne $volattrs->{'server'}) {
+	    fatal("destroy: found server is not the specified server!?");
+	}
+    } else {
+	$srv = $volattrs->{'server'};
+    }
+    if ($pool) {
+	if ($pool ne $volattrs->{'pool'}) {
+	    fatal("destroy: found pool is not the specified pool!?");
+	}
+    } else {
+	$pool = $volattrs->{'pool'};
+    }
+
+    #
+    # Delete the blockstore object
+    #
+    my $bstore = Blockstore->Lookup($srv, $name);
+    if (!$bstore) {
+	fatal("destroy: no blockstore '$srv/$name'");
+    }
+    if ($bstore->role() ne "partition") {
+	fatal("destroy: wrong type of blockstore '$srv/$name'");
+    }
+    if ($bstore->Delete()) {
+	fatal("destroy: could not delete blockstore '$srv/$name'");
+    }
+
+    #
+    # Call out to the server to delete the storage.
+    #
+    my $outref;
+    if (bsserver_cmd($srv, "$PROXYCMD destroy $pool $name", \$outref)) {
+	print STDERR "*** create: could not deallocate storage for '$name' on $srv/$pool:";
+	foreach my $str (@$outref) {
+	    print STDERR "  $str\n";
+	}
+	exit(-1);
+    }
+
+    return 0;
+}
+
+sub fatal($)
+{
+    my ($mesg) = $_[0];
+
+    die("*** $0:\n".
+	"    $mesg\n");
+}

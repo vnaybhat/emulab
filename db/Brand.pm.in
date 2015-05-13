@@ -1,0 +1,139 @@
+#!/usr/bin/perl -wT
+#
+# Copyright (c) 2005-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+package Brand;
+
+use strict;
+use Exporter;
+use vars qw(@ISA @EXPORT);
+
+@ISA    = "Exporter";
+@EXPORT = qw ( );
+
+use English;
+use libtestbed;
+
+# Configure variables
+my $TB		= "@prefix@";
+my $TBOPS       = "@TBOPSEMAIL@";
+my $TBAPPROVAL  = "@TBAPPROVALEMAIL@";
+my $TBAUDIT	= "@TBAUDITEMAIL@";
+my $TBBASE      = "@TBBASE@";
+my $TBWWW       = "@TBWWW@";
+ 
+#
+# Return an object representing a "brand" ... yes, its silly.
+#
+sub Create($$)
+{
+    my ($class, $brand) = @_;
+
+    if ($brand =~ /aptlab/) {
+	$brand = "aptlab";
+    }
+    elsif ($brand =~ /cloudlab/) {
+	$brand = "cloudlab";
+    }
+    else {
+	$brand = "emulab";
+    }
+    my $self           = {};
+    $self->{'BRAND'}   = $brand;
+
+    bless($self, $class);
+    return $self;
+}
+sub brand($)		{ return $_[0]->{'BRAND'}; }
+sub isAPT($)	        { return $_[0]->brand() eq "aptlab" ? 1 : 0; }
+sub isCloud($)	        { return $_[0]->brand() eq "cloudlab" ? 1 : 0; }
+sub isEmulab($)         { return $_[0]->brand() eq "emulab" ? 1 : 0; }
+
+sub wwwBase($)
+{
+    my ($self) = @_;
+
+    return ($self->isAPT() ? "https://www.aptlab.net" :
+	    $self->isCloud() ? "https://www.cloudlab.us" :
+	    "@TBBASE@");
+}
+
+sub ApprovalEmailAddress($)
+{
+    my ($self) = @_;
+
+    return ($self->isAPT() ? "aptlab-approval\@aptlab.net" :
+	    $self->isCloud() ? "cloudlab-approval\@cloudlab.us" :
+	    "@TBAPPROVALEMAIL@");
+}
+
+sub OpsEmailAddress($)
+{
+    my ($self) = @_;
+
+    return ($self->isAPT() ? "aptlab-ops\@aptlab.net" :
+	    $self->isCloud() ? "cloudlab-ops\@cloudlab.us" :
+	    $TBOPS);
+}
+
+sub EmailTag($)
+{
+    my ($self) = @_;
+
+    return ($self->isAPT() ? "aptlab.net" :
+	    $self->isCloud() ? "cloudlab.us" : "@THISHOMEBASE@");
+}
+
+sub SignupURL($$)
+{
+    my ($self, $project)  = @_;
+    my $wwwbase = $self->wwwBase();
+    my $pid     = $project->pid();
+
+    return ($self->isAPT() || $self->isCloud() ?
+	    "${wwwbase}/signup.php?pid=$pid" :
+	    "${wwwbase}/joinproject.php3?target_pid=$pid");
+}
+
+# So we can localize MAILTAG variable.
+sub SendEmail($$$$;$$@)
+{
+    my ($self, $to, $subject, $body, $from, $headers, @files) = @_;
+
+    # All this function does is this. 
+    local $libtestbed::MAILTAG = $self->EmailTag();
+    
+    SENDMAIL($to, $subject, $body, $from, $headers, @files);
+    return 0;
+}
+# So we can localize MAILTAG variable.
+sub AnonSendEmail($$$$;$$@)
+{
+    my ($self, $to, $subject, $body, $from, $headers, @files) = @_;
+
+    # All this function does is this. 
+    local $libtestbed::MAILTAG = $self->EmailTag();
+    
+    AnonSENDMAIL($to, $subject, $body, $from, $headers, @files);
+    return 0;
+}
+

@@ -1,0 +1,38 @@
+#
+# The template
+#
+use strict;
+use libinstall;
+use installvars;
+
+sub Install($$$)
+{
+    my ($server, $isupdate, $impotent) = @_;
+
+    # Replace if this script does an update for ip/domain.
+    return 0
+	if ($isupdate);
+
+    # XXX Temporary.
+    Phase "portfixup", "Fixing up packages", sub {
+	Phase "rsync", "Looking for rsync and installing", sub {
+	    DoneIfPackageInstalled("rsync");
+	    my $pname = GetPackage("rsync", $packagedir);
+	    AddPackage($pname, $packagedir);
+	};
+	Phase "samba", "Looking for Samba and installing", sub {
+	    if (!$WINSUPPORT) {
+		PhaseSkip("Windows support not enabled");
+	    }
+	    DoneIfPackageInstalled("samba");
+	    my $pname = GetPackage("samba", $packagedir);
+	    AddPackage($pname, $packagedir);
+	};
+    };
+
+    return 0;
+}
+
+# Local Variables:
+# mode:perl
+# End:

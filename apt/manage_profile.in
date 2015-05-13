@@ -1,0 +1,561 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use English;
+use strict;
+use Getopt::Std;
+use XML::Simple;
+use Data::Dumper;
+use CGI;
+use POSIX ":sys_wait_h";
+use POSIX qw(setsid);
+
+#
+# Back-end script to manage APT profiles.
+#
+sub usage()
+{
+    print("Usage: manage_profile create [-s uuid] <xmlfile>\n");
+    print("Usage: manage_profile update <profile> <xmlfile>\n");
+    print("Usage: manage_profile publish <profile>\n");
+    print("Usage: manage_profile delete <profile>\n");
+    exit(-1);
+}
+my $optlist     = "ds:t:";
+my $debug       = 0;
+my $update      = 0;
+my $snap        = 0;
+my $uuid;
+my $rspec;
+my $profile;
+my $instance;
+my $webtask;
+my $webtask_id;
+
+#
+# Configure variables
+#
+my $TB		    = "@prefix@";
+my $TBOPS           = "@TBOPSEMAIL@";
+my $MANAGEINSTANCE  = "$TB/bin/manage_instance";
+
+#
+# Untaint the path
+#
+$ENV{'PATH'} = "$TB/bin:$TB/sbin:/bin:/usr/bin:/usr/bin:/usr/sbin";
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Load the Testbed support stuff.
+#
+use lib "@prefix@/lib";
+use EmulabConstants;
+use emdb;
+use emutil;
+use User;
+use Project;
+use APT_Profile;
+use APT_Instance;
+use GeniXML;
+use GeniHRN;
+use WebTask;
+
+# Protos
+sub fatal($);
+sub UserError(;$);
+sub DeleteProfile($);
+sub PublishProfile($);
+
+# Parse args below.
+if (@ARGV < 2) {
+    usage();
+}
+my $action = shift(@ARGV);
+
+# The web interface (and in the future the xmlrpc interface) sets this.
+my $this_user = User->ImpliedUser();
+if (! defined($this_user)) {
+    $this_user = User->ThisUser();
+    if (!defined($this_user)) {
+	fatal("You ($UID) do not exist!");
+    }
+}
+
+if ($action eq "delete") {
+    exit(DeleteProfile($ARGV[0]));
+}
+elsif ($action eq "publish") {
+    exit(PublishProfile($ARGV[0]));
+}
+elsif (! ($action eq "create" || $action eq "update")) {
+    usage();
+}
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"s"})) {
+    $snap = 1;
+    $uuid = $options{"s"};
+}
+if (defined($options{"t"})) {
+    $webtask_id = $options{"t"};
+}
+if ($action eq "update") {
+    $update = 1;
+    $uuid = shift(@ARGV);
+}
+my $xmlfile = shift(@ARGV);
+
+#
+# These are the fields that we allow to come in from the XMLfile.
+#
+my $SLOT_OPTIONAL	= 0x1;	# The field is not required.
+my $SLOT_REQUIRED	= 0x2;  # The field is required and must be non-null.
+my $SLOT_ADMINONLY	= 0x4;  # Only admins can set this field.
+my $SLOT_UPDATE 	= 0x8;  # Allowed to update.
+#
+# XXX We should encode all of this in the DB so that we can generate the
+# forms on the fly, as well as this checking code.
+#
+my %xmlfields =
+    # XML Field Name        DB slot name         Flags             Default
+    ("profile_name"	   => ["name",		$SLOT_REQUIRED],
+     "profile_pid"	   => ["pid",		$SLOT_REQUIRED],
+     "profile_creator"	   => ["creator",	$SLOT_OPTIONAL],
+     "profile_listed"      => ["listed",	$SLOT_OPTIONAL|$SLOT_UPDATE],
+     "profile_public"      => ["public",	$SLOT_OPTIONAL|$SLOT_UPDATE],
+     "profile_shared"      => ["shared",	$SLOT_OPTIONAL|$SLOT_UPDATE],
+     "rspec"		   => ["rspec",		$SLOT_REQUIRED|$SLOT_UPDATE],
+     "script"		   => ["script",	$SLOT_OPTIONAL|$SLOT_UPDATE],
+);
+
+#
+# Must wrap the parser in eval since it exits on error.
+#
+my $xmlparse = eval { XMLin($xmlfile,
+			    VarAttr => 'name',
+			    ContentKey => '-content',
+			    SuppressEmpty => undef); };
+fatal($@)
+    if ($@);
+
+#
+# Process and dump the errors (formatted for the web interface).
+# We should probably XML format the errors instead but not sure I want
+# to go there yet.
+#
+my %errors = ();
+
+#
+# Make sure all the required arguments were provided.
+#
+my $key;
+foreach $key (keys(%xmlfields)) {
+    my (undef, $required, undef) = @{$xmlfields{$key}};
+
+    $errors{$key} = "Required value not provided"
+	if ($required & $SLOT_REQUIRED  &&
+	    ! exists($xmlparse->{'attribute'}->{"$key"}));
+}
+UserError()
+    if (keys(%errors));
+
+#
+# We build up an array of arguments to create.
+#
+my %new_args = ();
+my %update_args = ();
+
+foreach $key (keys(%{ $xmlparse->{'attribute'} })) {
+    my $value = $xmlparse->{'attribute'}->{"$key"}->{'value'};
+    if (!defined($value)) {	# Empty string comes from XML as an undef value.
+	$xmlparse->{'attribute'}->{"$key"}->{'value'} = $value = "";
+    }
+
+    print STDERR "User attribute: '$key' -> '$value'\n"
+	if ($debug);
+
+    my $field = $key;
+    if (!exists($xmlfields{$field})) {
+	next; # Skip it.
+    }
+    my ($dbslot, $required, $default) = @{$xmlfields{$field}};
+
+    if ($required & $SLOT_REQUIRED) {
+	# A slot that must be provided, so do not allow a null value.
+	if (!defined($value)) {
+	    $errors{$key} = "Must provide a non-null value";
+	    next;
+	}
+    }
+    if ($required & $SLOT_OPTIONAL) {
+	# Optional slot. If value is null skip it. Might not be the correct
+	# thing to do all the time?
+	if (!defined($value)) {
+	    next
+		if (!defined($default));
+	    $value = $default;
+	}
+    }
+    if ($required & $SLOT_ADMINONLY) {
+	# Admin implies optional, but thats probably not correct approach.
+	$errors{$key} = "Administrators only"
+	    if (! $this_user->IsAdmin());
+    }
+	
+    # Now check that the value is legal.
+    if (! TBcheck_dbslot($value, "apt_profiles",
+			 $dbslot, TBDB_CHECKDBSLOT_ERROR)) {
+	$errors{$key} = TBFieldErrorString();
+	next;
+    }
+    $new_args{$dbslot} = $value;
+    $update_args{$dbslot} = $value
+	if ($update && ($required & $SLOT_UPDATE));
+
+    if ($key eq "rspec") {
+	$rspec = $value;
+    }
+}
+UserError()
+    if (keys(%errors));
+
+#
+# We need to make sure the project exists and is a valid project for
+# the creator (current user). 
+#
+my $project = Project->Lookup($new_args{"pid"});
+if (!defined($project)) {
+    $errors{"profile_pid"} = "No such project exists";
+}
+elsif (!$project->AccessCheck($this_user, TB_PROJECT_MAKEIMAGEID())) {
+    $errors{"profile_pid"} = "Not enough permission in this project";
+}
+
+#
+# Are we going to snapshot a node in an experiment? If so we
+# sanity check to make sure there is just one node. 
+#
+if ($snap) {
+    $instance = APT_Instance->Lookup($uuid);
+    if (!defined($instance)) {
+	fatal("Could not look up instance $uuid");
+    }
+    my $manifest = GeniXML::Parse($instance->manifest());
+    if (! defined($manifest)) {
+	fatal("Could not parse manifest");
+    }
+    my @nodes = GeniXML::FindNodes("n:node", $manifest)->get_nodelist();
+    if (@nodes != 1) {
+	$errors{"error"} = "Too many nodes (> 1) to snapshot";
+	UserError();
+    }
+}
+if ($update) {
+    $profile = APT_Profile->Lookup($uuid);
+    if (!defined($profile)) {
+	fatal("Could not lookup profile for update $uuid");
+    }
+    # Kill the description.. No longer used.
+    delete($update_args{"description"});
+
+    #
+    # If the rspec/script changed, then make a new version of the profile.
+    # Everything else is metadata.
+    #
+    if (exists($update_args{"rspec"}) || exists($update_args{"script"})) {
+	if ((exists($update_args{"rspec"}) &&
+	     $update_args{"rspec"} ne $profile->rspec()) ||
+	    (exists($update_args{"script"}) &&
+	     $update_args{"script"} ne $profile->script())) {
+	    if ($this_user->IsAdmin()) {
+		$profile = $profile->NewVersion($this_user);
+		if (!defined($profile)) {
+		    fatal("Could not create new version of the profile");
+		}
+	    }
+	    $profile->UpdateVersion({"rspec" => $update_args{"rspec"}})
+		if (exists($update_args{"rspec"}));
+	    $profile->UpdateVersion({"script" => $update_args{"script"}})
+		if (exists($update_args{"script"}));
+	}
+	delete($update_args{"rspec"})
+	    if (exists($update_args{"rspec"}));
+	delete($update_args{"script"})
+	    if (exists($update_args{"script"}));
+    }
+    $profile->UpdateMetaData(\%update_args) == 0 or
+	fatal("Could not update profile record");
+
+    # Bump the modtime.
+    $profile->MarkModified();
+}
+else {
+    my $usererror;
+
+    $profile = APT_Profile->Lookup($new_args{"pid"}, $new_args{"name"});
+    if (defined($profile)) {
+	$errors{"profile_name"} = "Already in use";
+	UserError();
+    }
+    $profile =
+	APT_Profile->Create($profile, $project,
+			    $this_user, \%new_args, \$usererror);
+    if (!defined($profile)) {
+	if (defined($usererror)) {
+	    $errors{"profile_name"} = $usererror;
+	    UserError();
+	}
+	fatal("Could not create new profile");
+    }
+    if (!$this_user->IsAdmin()) {
+	$profile->Publish();
+    }
+}
+
+#
+# Now do the snapshot operation.
+#
+if (defined($instance)) {
+    my $manifest = GeniXML::Parse($instance->manifest());
+    if (! defined($manifest)) {
+	fatal("Could not parse manifest");
+    }
+    my ($node) = GeniXML::FindNodes("n:node", $manifest)->get_nodelist();
+    my $sliver_urn = GeniXML::GetSliverId($node);
+    my $node_id    = GeniXML::GetVirtualId($node);
+    my $apt_uuid   = $instance->uuid();
+    my $imagename  = $profile->name();
+
+    #
+    # Grab the webtask object so we can watch it. We are looking
+    # for it to finish, so we can unlock the profile for use. Note
+    # this always creates a webtask, even if not directed to on the
+    # commmand line, so that we can communicate with the script we
+    # call that does the work. 
+    #
+    $webtask = WebTask->Create($profile->uuid(), $webtask_id);
+    if (!defined($webtask)) {
+	$profile->Delete(1);
+    }
+    $webtask->AutoStore(1);
+
+    if ($profile->Lock()) {
+	$profile->Delete(1);
+	fatal("Could not lock new profile");
+    }
+
+    my $command = "$MANAGEINSTANCE -t " . $webtask->task_id() . " ".
+	"snapshot $apt_uuid $imagename $node_id";
+    
+    #
+    # This returns pretty fast, and then the imaging takes place in
+    # the background at the aggregate. The script keeps a process
+    # running in the background waiting for the sliver to unlock and
+    # the sliverstatus to indicate the node is running again.
+    #
+    my $output = emutil::ExecQuiet($command);
+    if ($?) {
+	$profile->Delete(1);
+	$webtask->Delete()
+	    if (!defined($webtask_id));
+	print STDERR $output . "\n";
+	fatal("Failed to create disk image!");
+    }
+    #
+    # The script helpfully put the new image urn in the webtask.
+    #
+    $webtask->Refresh();
+    my $image_urn = $webtask->image_urn();
+    if (!defined($image_urn) ||
+	$profile->UpdateDiskImage($image_urn)) {
+	$webtask->Delete()
+	    if (!defined($webtask_id));
+	$profile->Delete(1);
+	fatal("Could not update image URN in rspec");
+    }
+
+    #
+    # Exit and leave child to poll.
+    #
+    if (! $debug) {
+	my $child = fork();
+	if ($child) {
+	    exit(0);
+	}
+	# Close our descriptors so web server thinks we are disconnected.
+	if ($webtask_id) {
+	    for (my $i = 0; $i < 1024; $i++) {
+	        POSIX::close($i);
+	    }
+	}
+	# Let parent exit;
+	sleep(2);
+        POSIX::setsid();
+    }
+    #
+    # We are waiting for the backend process to exit. The web interface is
+    # reading the webtask structure, but if it fails we want to know that
+    # so we can delete the profile. 
+    #
+    while (1) {
+	sleep(10);
+	
+	$webtask->Refresh();
+	last
+	    if (defined($webtask->exited()));
+
+	#
+	# See if the process is still running. If not then it died badly.
+	# Mark the webtask as exited.
+	#
+	my $pid = $webtask->process_id();
+	if (! kill(0, $pid)) {
+	    # Check again in case it just exited.
+	    $webtask->Refresh();
+	    if (! defined($webtask->exited())) {
+		$webtask->Exited(-1);
+	    }
+	    last;
+	}
+    }
+    if ($webtask->exitcode()) {
+	$profile->Delete(1);
+	$webtask->Delete()
+	    if (!defined($webtask_id));
+	exit(1);
+    }
+    $profile->Unlock();
+    $webtask->Delete()
+	if (!defined($webtask_id));
+    exit(0);
+}
+exit(0);
+
+sub fatal($)
+{
+    my ($mesg) = @_;
+
+    print STDERR "*** $0:\n".
+	         "    $mesg\n";
+    # Exit with negative status so web interface treats it as system error.
+    exit(-1);
+}
+
+#
+# Generate a simple XML file that PHP can parse. The web interface
+# relies on using the same name attributes for the errors, as for
+# the incoming values.
+#
+sub UserError(;$)
+{
+    my ($msg) = @_;
+    
+    if (defined($msg)) {
+	$errors{"error"} = $msg;
+    }
+    if (keys(%errors)) {
+	print "<errors>\n";
+	foreach my $key (keys(%errors)) {
+    	    print "<error name='$key'>" . CGI::escapeHTML($errors{$key});
+	    print "</error>\n";
+	}
+	print "</errors>\n";
+    }
+    # Exit with positive status so web interface treats it as user error.
+    exit(1);
+}
+
+sub escapeshellarg($)
+{
+    my ($str) = @_;
+
+    $str =~ s/[^[:alnum:]]/\\$&/g;
+    return $str;
+}
+
+#
+# Delete a profile.
+#
+sub DeleteProfile($)
+{
+    my ($name)  = @_;
+    my $profile = APT_Profile->Lookup($name);
+    if (!defined($profile)) {
+	fatal("No such profile exists");
+    }
+    #
+    # Not allowed to delete a published profile, yet. Needs thought.
+    #
+    if (defined($profile->published()) && !$this_user->IsAdmin()) {
+	UserError("Not allowed to delete a published profile");
+    }
+    if (!$profile->IsHead()) {
+	UserError("Only allowed to delete the most recent profile");
+    }
+    #
+    # Version zero is special of course.
+    #
+    if ($profile->version()) {
+	$profile->DeleteVersion(0) == 0 or
+	    fatal("Could not delete profile version");
+    }
+    else {
+	# Purge it. At some point we want to save them.
+	$profile->Delete(1) == 0 or
+	    fatal("Could not delete profile");
+    }
+    return 0;
+}
+
+#
+# Publish a profile.
+#
+sub PublishProfile($)
+{
+    my ($name)  = @_;
+    my $profile = APT_Profile->Lookup($name);
+    if (!defined($profile)) {
+	fatal("No such profile exists");
+    }
+    if (!$profile->IsHead()) {
+	UserError("Only allowed to publish the most recent profile");
+    }
+    $profile->Publish() == 0 or
+	fatal("Could not publish profile");
+    return 0;
+}

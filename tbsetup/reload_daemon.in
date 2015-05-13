@@ -1,0 +1,687 @@
+#!/usr/bin/perl -w
+
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+
+use English;
+use Getopt::Std;
+
+#
+# Look for nodes to reload.
+#
+#	usage: reload_daemon [-d]
+#
+# TODO: Use "logger" instead of writing a log file.
+#
+sub usage()
+{
+    print STDOUT "Usage: reload_daemon [-d] [-t tag]\n" .
+	"    -d     Prevent daemonization\n" . 
+	"    -t tag Only manage reloads for nodes or node types\n" . 
+	"           that have the value of <tag> for a node_type_attribute\n" . 
+	"           or a node_attribute named 'reload_daemon_tag'.\n" . 
+	"           IF this tag is not set, the reload_daemon picks only\n" . 
+	"           those nodes that DO NOT have this type or node\n" . 
+	"           attribute set!\n";
+    exit(-1);
+}
+my  $optlist = "dt:";
+
+#
+# Configure variables
+#
+my $TB       = "@prefix@";
+my $DBNAME   = "@TBDBNAME@";
+my $TBOPS    = "@TBOPSEMAIL@";
+
+# Set this to turn off tblog in libraries.
+$ENV{'TBLOG_OFF'} = "yep";
+
+# Testbed Support library
+use lib "@prefix@/lib";
+use libdb;
+use libosload;
+use libtestbed;
+use Experiment;
+use Node;
+use NodeType;
+use EmulabFeatures;
+use User;
+
+#
+# These come from the library.
+# 
+my $RELOADPID	= NODERELOADING_PID;
+my $RELOADEID	= NODERELOADING_EID;
+my $PENDINGEID	= NODERELOADPENDING_EID;
+my $REPOSPID	= NODEREPOSITIONING_PID;
+my $RPPENDINGEID= NODEREPOSPENDING_EID;
+my $NODEDEAD_PID= NODEDEAD_PID;
+my $NODEDEAD_EID= NODEDEAD_EID;
+
+sub myosload($$$$);
+sub logit($);
+sub fatal($);
+sub notify($);
+sub freefromreloading($);
+		      
+my $sched_reload= "$TB/sbin/sched_reload";
+my $reboot	= "$TB/bin/node_reboot";
+my $tbrsync     = "$TB/bin/tbrsync";
+my $logfile	= "$TB/log/reloadlog";
+my $debug	= 0;
+my $tag;
+my $retry_time  = 20;              # in minutes
+my $warn_time   = $retry_time * 2; # in minutes
+my $widearea_multiplier = 2;       # widearea nodes get (mult+1)x longer, but
+                                   #  possibly not quite true cause of mustwipe)
+my %retried     = ();
+my %warned	= ();
+my %failed	= ();
+my @retry_list  = ();
+
+#
+# Turn off line buffering on output (dots ...).
+#
+$| = 1;
+
+#
+# Untaint the path
+# 
+$ENV{'PATH'} = "/bin:/usr/bin:";
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+%options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (@ARGV != 0) {
+    usage();
+}
+if (defined($options{"d"})) {
+    $debug = $options{"d"};
+}
+if (defined($options{"t"})) {
+    $tag = $options{"t"};
+    # rename the logfile too
+    $logfile = "$logfile-$tag";
+}
+
+#
+# This should run as root to make sure that it has permission to reboot nodes
+# (since only root is allowed to power cycle nodes at any time - it's time-
+# limited for anyone else)
+#
+if ($UID != 0 && !defined($tag)) {
+    die("*** $0:\n".
+	"    Only root can run this script!\n");
+}
+
+#
+# Only one please (for the default reload_daemon).  If you specified
+# a tag, it's your problem.
+#
+if (!defined($tag) && CheckDaemonRunning("reload_daemon")) {
+    fatal("Not starting another reload daemon!");
+}
+
+# Go to ground.
+if (! $debug) {
+    if (TBBackGround($logfile)) {
+	exit(0);
+    }
+}
+if (!defined($tag) && MarkDaemonRunning("reload_daemon")) {
+    fatal("Could not mark daemon as running!");
+}
+#
+# Setup a signal handler for newsyslog.
+#
+sub handler()
+{
+    ReOpenLog($logfile);
+}
+$SIG{HUP} = \&handler
+    if (!$debug);
+
+logit("Reload Daemon starting... pid $$");
+
+# We use this a lot.
+my $reloading_experiment = Experiment->Lookup($RELOADPID, $RELOADEID);
+if (!defined($reloading_experiment)) {
+    Fatal("Could not locate experiment object for $RELOADEID");
+    return;
+}
+
+#
+# Loop, looking for nodes to reload.
+# 
+my $idle=0;
+while (1) {
+    my($count, $which, @row, %hrow, $imageid, $node, $retry, $stamp);
+    my($pid, $eid);
+
+    # Partial delay between loops in case of an error.
+    if ($idle) { sleep(10); } # Wait longer if we're not doing anything
+    else { sleep(1); }
+
+    $idle=1; # Assume we're going to be idle this iteration
+    #
+    # We use this to figure out when to delete nodes from the retried and
+    # warned hashes
+    #
+    my $time = time();
+
+    #
+    # If we are the default reload daemon (i.e., have no tag for our 
+    # reload_pool), only look for nodes that have neither a reload_pool
+    # node_type_attribute nor a node_attribute.
+    #
+    # If we have a reload_pool tag, only pick up nodes that 
+    #  * have our tag for the node_type_attribute, and our tag or NULL
+    #    for the node_attribute, OR
+    #  * have our tag for the node attribute.
+    #
+    my $tag_query = '';
+    if (!defined($tag)) {
+	$tag_query = 'and nta_reload_pool.attrvalue is NULL' . 
+	    ' and na_reload_pool.attrvalue is NULL';
+    }
+    else {
+	$tag_query = "" . 
+	    " and ((nta_reload_pool.attrvalue='$tag' and" . 
+	    "       (na_reload_pool.attrvalue='$tag'" . 
+	    "        or na_reload_pool.attrvalue is NULL))" . 
+	    "      or na_reload_pool.attrvalue='$tag')";
+    }
+
+    #
+    # First, look for nodes that have been in the reloading experiment for
+    # longer than $retry_time, and try rebooting them
+    #
+    # XXX we count on mustwipe having the value 0, 1, 2 to represent
+    # ever slower forms of wipeage.  For retry_time of 20 minutes that
+    # yields waits of 20, 40 and 60 minutes.
+    #
+    $query_result =
+	DBQueryWarn("select r.node_id,r.mustwipe from reserved as r" . 
+		    " left join nodes as n on r.node_id=n.node_id" . 
+		    " left join node_types as nt on n.type=nt.type " . 
+		    " left outer join (select type,attrvalue from node_type_attributes" . 
+		    "   where attrkey='reload_daemon_pool') as nta_reload_pool" . 
+		    "   on n.type=nta_reload_pool.type" . 
+		    " left outer join (select node_id,attrvalue from node_attributes" . 
+		    "   where attrkey='reload_daemon_pool') as na_reload_pool" . 
+		    "   on r.node_id=na_reload_pool.node_id" . 
+		    " where r.pid='$RELOADPID' and r.eid='$RELOADEID' and" .
+		    " (CURRENT_TIMESTAMP - INTERVAL ($retry_time * (r.mustwipe + 1) + (nt.isremotenode * $retry_time * $widearea_multiplier)) MINUTE)".
+		    "  > rsrv_time" . 
+		    " $tag_query");
+
+    if (! $query_result) {
+	logit("DB Error. Waiting a bit.");
+	next;
+    }
+
+    while (($node, $mustwipe) = $query_result->fetchrow) {
+	$idle=0;
+	#
+	# If this was a node that failed osload, then instead of rebooting,
+	# send it back through osload.
+	# 
+	if ($failed{$node}) {
+	    logit("$node failed an earlier osload. Trying again.");
+	    push(@retry_list, [$node, $mustwipe]);
+	    delete $failed{$node};
+	    # Skip any reboots. 
+	    $retried{$node} = $time;
+	    next;
+	}
+	if (!$retried{$node}) {
+	    logit("\nReload appears wedged. ".
+		  "Power cycling and trying once more!");
+		
+	    if (system("$reboot -f $node")) {
+		notify("$node was wedged, but could not be rebooted.\n".
+		       "Moved to $NODEDEAD_PID/$NODEDEAD_EID\n");
+
+		MarkPhysNodeDown($node);
+		TBSetNodeLogEntry($node, "daemon",
+				  TB_DEFAULT_NODELOGTYPE(),
+				  "'Moved to hwdown; reload reboot failed'");
+	    }
+	}
+	$retried{$node} = $time;
+    }
+
+    #
+    # We can pull out all nodes that were not 'touched' (matched by the
+    # select above) during this pass
+    #
+    foreach $node (keys %retried) {
+	if ($retried{$node} != $time) {
+	    delete $retried{$node};
+	}
+    }
+
+    #
+    # Next, we do the same thing for nodes in the reloading experiment for
+    # longer than $warn_time, and warn the admins.
+    #
+    # XXX again, we scale by the value of mustwipe.
+    #
+    $query_result =
+	DBQueryWarn("select r.node_id,r.mustwipe from reserved as r" . 
+		    " left join nodes as n on r.node_id=n.node_id" . 
+		    " left join node_types as nt on n.type=nt.type " . 
+		    " left outer join (select type,attrvalue from node_type_attributes" . 
+		    "   where attrkey='reload_daemon_pool') as nta_reload_pool" . 
+		    "   on n.type=nta_reload_pool.type" . 
+		    " left outer join (select node_id,attrvalue from node_attributes" . 
+		    "   where attrkey='reload_daemon_pool') as na_reload_pool" . 
+		    "   on r.node_id=na_reload_pool.node_id" . 
+		    " where r.pid='$RELOADPID' and r.eid='$RELOADEID' and " .
+		    " (CURRENT_TIMESTAMP - INTERVAL ($warn_time * (mustwipe + 1) + (nt.isremotenode * $warn_time * $widearea_multiplier)) MINUTE)".
+		    "  > rsrv_time" . 
+		    " $tag_query");
+    
+    if (! $query_result) {
+	logit("DB Error. Waiting a bit.");
+	next;
+    }
+
+    while (($node, $mustwipe) = $query_result->fetchrow) {
+	$idle=0;
+	if (!$warned{$node}) {
+	    my $toolong = $warn_time * ($mustwipe + 1);
+	    notify("Node $node has been in $RELOADPID/$RELOADEID for " .
+		   "more than $toolong minutes");
+	}
+	$warned{$node} = $time;
+    }
+
+    #
+    # We can pull out all nodes that were not 'touched' (matched by the
+    # select above) during this pass
+    #
+    foreach $node (keys %warned) {
+	if ($warned{$node} != $time) {
+	    delete $warned{$node};
+	}
+    }
+
+    #
+    # Find all of the free nodes that have not been reloaded (no pid entry
+    # in last_reservation, which is reset anytime a node is reloaded by
+    # the system).
+    #
+    # XXX - This should not be hardwired in.
+    # 
+    my $CLASSCLAUSE = "(n.class='pc' or n.class='pct')";
+    
+    $query_result =
+	DBQueryWarn("select a.node_id,b.pid,b.eid,b.mustwipe,a.type ".
+		    "from reserved as b ".
+		    "left join nodes as a on a.node_id=b.node_id ".
+		    "left join last_reservation as l on l.node_id=a.node_id ".
+		    "left join node_types as n on n.type=a.type ".
+		    " left outer join (select type,attrvalue from node_type_attributes" . 
+		    "   where attrkey='reload_daemon_pool') as nta_reload_pool" . 
+		    "   on n.type=nta_reload_pool.type" . 
+		    " left outer join (select node_id,attrvalue from node_attributes" . 
+		    "   where attrkey='reload_daemon_pool') as na_reload_pool" . 
+		    "   on b.node_id=na_reload_pool.node_id" .
+		    " where ((b.node_id is null and $CLASSCLAUSE and l.pid!='') ".
+		    "or (b.pid='$RELOADPID' and b.eid='$PENDINGEID')) ". 
+		    " $tag_query " . 
+		    "order by a.node_id");
+
+    if (! $query_result) {
+	logit("DB Error. Waiting a bit.");
+	next;
+    }
+    $count = $query_result->numrows;
+
+    if (!$count && !scalar(@retry_list)) {
+	next;
+    } else {
+	$idle=0;
+    }
+
+    # Grab all the nodes that match
+    my @pending_list = @retry_list;
+    while (%hrow = $query_result->fetchhash()) {
+	$node = $hrow{'node_id'};
+	$pid  = $hrow{'pid'};
+	$eid  = $hrow{'eid'};
+	$mustwipe = $hrow{'mustwipe'};
+	$type = $hrow{'type'};
+	$imageable = NodeType->LookupSync($type)->imageable();
+
+	#
+	# If any non-imageable nodes made it this far, just free them now
+	#
+	if (!$imageable) {
+	    logit("Skipping non-imageable node $node.");
+	    freefromreloading($node);
+	    next;
+	}
+	if ($pid eq $RELOADPID && $eid eq $PENDINGEID) {
+	    push(@pending_list, [$node,$mustwipe]);
+	} else {
+	    push(@other_list, [$node,$mustwipe]);
+	}
+    }
+    my $nodes = join(" ", map { $_->[0] } @pending_list, @other_list);
+    if (!$nodes) {
+	next;
+    }
+
+    logit("Trying to reload $nodes.");
+    $nodes = "";
+
+    #
+    # What we do depends on whether its a free node or a node reserved
+    # into the reload pending experiment.
+    #
+    if (@pending_list > 0) {
+	#
+	# Query for the imageid from the reloads table.
+	#
+	my %images = ();
+	my %imagenodes = ();
+	my %nodeobjs = ();
+	foreach $ref (@pending_list) {
+	    ($node, $mustwipe) = @{$ref};
+	    my $nodeobj = Node->Lookup($node);
+	    if (!defined($nodeobj)) {
+		notify("Could not local node object for $node\n");
+		next;
+	    }
+	    $nodeobjs{$node} = $nodeobj;
+	    
+	    my ($image_id, $reload_type) = $nodeobj->GetSchedReload();
+	    if (!defined($image_id)) {
+		#
+		# If this node didn't make it into the scheduled_reloads table
+		# for some reason, then we load it with the default image and
+		# type.
+		#
+		$imageid = "";
+	    }
+
+	    #
+	    # We need to divide up nodes not only by the image they are
+	    # to load (imageid) but also by if and how the disk should be
+	    # zeroed (mustzero).  So we really have a hash of hashes each
+	    # of which is an array of nodes.  However, my perl skilz are
+	    # not up to that so just combine the imageid and mustwipe into
+	    # a single hash key ('/' is illegal in both, so we use it as
+	    # the separator).
+	    #
+	    my $idid = "$imageid/$mustwipe";
+
+	    $images{$node} = $imageid;
+	    if (defined(@{$imagenodes{$idid}})) {
+		push(@{$imagenodes{$idid}},$node);
+	    } else {
+		$imagenodes{$idid} = [$node];
+	    }
+	    if ($debug) {
+		print "$node ($mustwipe) => $images{$node} == $imageid (".
+		  join(",",@{$imagenodes{$idid}}).")\n";
+	    }
+	}
+	
+	#
+	# The node is reserved into the special pid/eid, as the result
+	# of a sched_reload while it was still allocated to an experiment.
+	# We change the reservation EID over and fire up an osload
+	# directly.
+	#
+	foreach $ref (@pending_list) {
+	    ($node, $mustwipe) = @{$ref};
+	    my $nodeobj = $nodeobjs{$node};
+	    next
+		if (!defined($nodeobj));
+
+	    if ($nodeobj->MoveReservation($reloading_experiment) == 0) {
+		$nodeobj->SetNodeHistory(TB_NODEHISTORY_OP_MOVE, undef,
+					 $reloading_experiment);
+	    }
+	}
+	# It is now safe to clear this.
+	@retry_list = ();
+
+	#
+	# Now run an OS load for each image.
+	# We invoke libosload directly rather than calling os_load,
+	# not so much for efficiency but because it gives us more
+	# precise knowledge about failures.
+	#
+	foreach my $idid (keys %imagenodes) {
+
+	    my @nodelist = @{$imagenodes{$idid}};
+	    my $nodestr = join(' ', @nodelist);
+
+	    ($imageid, $mustzero) = split("/", $idid);
+
+	    logit("Invoking osload on $nodestr.");
+
+	    my @failedload = ();
+	    if (myosload($imageid, $mustzero, \@nodelist, \@failedload)) {
+		$nodestr = join(' ', @failedload);
+		notify("OS load failed on $nodestr. ".
+		       "That is not supposed to happen.\n".
+		       "Attempting to recover from this unfortunate ".
+		       "situation!\n");
+
+		# Record the failure list. If we get to the 15 minute
+		# retry, call osload again instead of rebooting.
+		foreach my $node (@failedload) {
+		    $failed{$node} = $time;		    
+		}
+		foreach my $node (@nodelist) {
+		    if (!$failed{$node}) {
+			$nodes .= "$node ";
+		    }
+		}
+	    }
+	    else {
+		$nodes .= "$nodestr ";
+		logit("osload done.");
+	    }
+	}
+    }
+	
+    if (@other_list > 0 ) {
+	my $nodestr = join(" ", map { $_->[0] } @other_list);
+
+	#
+	# Call sched_reload with the "force" option, which says that if
+	# sched_reload cannot reserve the node (cause someone just got it)
+	# then don't schedule a reload for later. Just fail outright.
+	# We will try again in a bit.
+	#
+	# We do not need to specify an imageid, since we want the node
+	# default, and sched_reload will pick that up from the database
+	# in the absence of a -i option. 
+	#
+	logit("Invoking sched_reload on $nodestr.");
+	if (system("$sched_reload -f $nodestr")) {
+	    #
+	    # Could not get it. Wait and go around again.
+	    #
+	    logit("$sched_reload failed on $nodestr. Waiting a bit.");
+	    next;
+	}
+	$nodes .= "$nodestr ";
+    }
+
+    if ($nodes) {
+	logit("Reload of $nodes has started.");
+	#
+	# For Frisbee reloads, we don't wait for the node to finish reloading,
+	# since the whole point is to let many nodes load at once.
+	#
+	logit("Not waiting for frisbee reload of $nodes.");
+    } else {
+	logit("No nodes eligible for reload.");
+    }
+}
+
+sub myosload($$$$)
+{
+    my ($imageid, $mustzero, $nlist, $failedp) = @_;
+
+    my %osloadargs  = ();
+    my %nodestatus = ();
+    my $failed = 0;
+
+    $osloadargs{'waitmode'} = 0;
+    $osloadargs{'zerofree'} = $mustzero;
+    # XXX we don't set prepare?
+    #$osloadargs{'prepare'}  = 1;
+    $osloadargs{'nodelist'} = [ @{$nlist} ];
+    # No imageid means to load the default image.
+    $osloadargs{'imageids'} = [ $imageid ]
+	if ($imageid);
+
+    # XXX replicate what os_load does
+    my $oquerymax = $libdb::DBQUERY_MAXTRIES;
+    $libdb::DBQUERY_MAXTRIES = 30;
+
+    my $user = User->ThisUser();
+    my $experiment = $reloading_experiment;
+    my $group = $experiment->GetGroup();
+    if (EmulabFeatures->FeatureEnabled("NewOsload",$user,$group,$experiment)) {
+	require libosload_new;
+
+	my $loadobj = libosload_new->New();
+	$loadobj->debug($debug);
+	#
+	# XXX basically, tell devices that might be reconfig'd via push
+	# from us (like switches) that a reconfig should follow the reload!
+	#
+	$osloadargs{'reconfig'} = 1;
+
+	# add a few more things for feature checks down the line:
+	$osloadargs{'user'} = $user;
+	$osloadargs{'experiment'} = $experiment;
+	$osloadargs{'group'} = $group;
+	$failed = $loadobj->osload(\%osloadargs, \%nodestatus);
+    } else {
+	$failed = osload(\%osloadargs, \%nodestatus);
+    }
+
+    if ($failed) {
+	my @list = ();
+	foreach my $node (keys %nodestatus) {
+	    if ($nodestatus{$node}) {
+		push @list, $node;
+	    }
+	}
+	@{$failedp} = @list;
+    }
+
+    $libdb::DBQUERY_MAXTRIES = $oquerymax;
+
+    return $failed;
+}
+
+#
+# free up the node and clear any assocaited reload DB state.
+# (code stolen from stated).
+#
+sub freefromreloading($) {
+    my $nodeid = shift;
+    my $node = Node->Lookup($nodeid);
+    if (!defined($node)) {
+	notify("Could not get node object for $nodeid\n");
+	return;
+    }
+    $node->FlushReserved();
+    $node->ClearCurrentReload();
+    my $experiment = $node->Reservation();
+    if (defined($experiment) &&
+	$experiment->pid() eq $RELOADPID &&
+	($experiment->eid() eq $RELOADEID ||
+	 $experiment->eid() eq $PENDINGEID)) {
+	$node->ClearSchedReload();
+
+	# Check if the robot is back in its pen, otherwise we have to throw it
+	# back to repositionpending.
+	my $loc_result =
+	    DBQueryWarn("SELECT * FROM reposition_status ".
+			"WHERE node_id='$nodeid'");
+
+	if ($loc_result->numrows) {
+	    my $target_experiment =
+		Experiment->Lookup($RELOADPID, $RPPENDINGEID);
+	    if (!defined($target_experiment)) {
+		notify("Could not locate experiment object for $RPPENDINGEID\n");
+		return;
+	    }
+	    if ($node->MoveReservation($target_experiment) == 0) {
+		logit("Reposition pending nodes moved to $RPPENDINGEID.");
+
+		$node->SetNodeHistory(TB_NODEHISTORY_OP_MOVE, undef,
+				      $target_experiment);
+	    }
+	}
+	else {
+	    $node->ClearReservation();
+	    $node->SetNodeHistory(TB_NODEHISTORY_OP_FREE, undef, $experiment);
+	}
+    }
+}
+
+sub logit($)
+{
+    my ($msg) = @_;
+    my $stamp = localtime();
+
+    print "$stamp: $msg\n";
+}
+
+sub fatal($)
+{
+    local($msg) = $_[0];
+
+    SENDMAIL($TBOPS, "Reload Daemon Died", $msg, $TBOPS);
+    MarkDaemonStopped("reload_daemon");
+    die($msg);
+}
+
+sub notify($)
+{
+    my($mesg) = $_[0];
+    my $stamp = localtime();
+
+    print "$stamp: $mesg\n";
+    SENDMAIL($TBOPS, "Reload Daemon Message", $mesg, $TBOPS);
+}

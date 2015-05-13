@@ -1,0 +1,89 @@
+#
+# Copyright (c) 2000-2011 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+SRCDIR		= @srcdir@
+TESTBED_SRCDIR	= @top_srcdir@
+OBJDIR		= @top_builddir@
+SUBDIR		= $(subst $(TESTBED_SRCDIR)/,,$(SRCDIR))
+
+TARBALL		= iperf-2.0.2.tar.gz
+
+include $(OBJDIR)/Makeconf
+
+SYSTEM         := $(patsubst CYGWIN%,CYGWIN,$(shell uname -s))
+
+ifeq ($(SYSTEM),CYGWIN)
+# Compile single-threaded on Windows.  Otherwise, the client iperf often hangs
+# after the first phase of a two-way bandwidth test.
+CONFIG_ARGS     = --disable-threads
+endif
+
+ifeq ($(host_cpu),arm)
+TARGETS =
+ITARGETS =
+else
+TARGETS = src/emulab-iperf
+ITARGETS = iperf-install
+endif
+
+all: $(TARGETS)
+
+include $(TESTBED_SRCDIR)/GNUmakerules
+
+# Next two rules for linux, where make=gmake.
+%-am:		Makefile force
+	$(MAKE) -f Makefile $@
+
+%-recursive:	Makefile force
+	$(MAKE) -f Makefile $@
+
+src/emulab-iperf:	iperf-2.0.2 config.status build-iperf
+
+build-iperf: Makefile
+	$(MAKE) -f Makefile all
+
+client: all
+
+iperf-install: build-iperf
+	$(INSTALL_PROGRAM) -s src/iperf $(DESTDIR)$(CLIENT_BINDIR)/emulab-iperf
+
+client-install: $(ITARGETS)
+
+# Note: GNU make wants to pass options in MAKEFLAGS (w) that are incompatible
+# with BSD make.  So we just force configure to assume/use gmake for BSD.
+config.status:
+	MAKE=$(MAKE) iperf-2.0.2/configure $(CONFIG_ARGS)
+
+iperf-2.0.2:
+	$(SRCDIR)/iperf-fetch.sh $(SRCDIR) $(TARBALL)
+
+clean:
+	if [ -r Makefile ]; then $(MAKE) -f Makefile clean; fi
+	rm -f config.h config.log stamp-h1
+
+reallyclean: clean
+	rm -rf config.status Makefile compat doc include src \
+	    iperf-2.0.2 $(TARBALL)
+
+Makefile: config.status
+
+force: ;

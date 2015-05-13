@@ -1,0 +1,141 @@
+#
+# Stub file for setting up elab in elab.
+#
+# Use the --with-TBDEFS=filename to specify your own file.
+# If you add a variable, be sure to go and update configure.in.
+#
+TBDBNAME=tbdb
+TBADMINGROUP=tbadmin
+TBOPSEMAIL=testbed-ops@ops.utah.cloudlab.us
+TBLOGSEMAIL=testbed-logs@ops.utah.cloudlab.us
+TBWWWEMAIL=testbed-www@ops.utah.cloudlab.us
+TBAPPROVALEMAIL=testbed-approval@ops.utah.cloudlab.us
+TBAUDITEMAIL=testbed-audit@ops.utah.cloudlab.us
+TBSTATEDEMAIL=testbed-stated@ops.utah.cloudlab.us
+TBTESTSUITEEMAIL=testbed-testsuite@ops.utah.cloudlab.us
+TBAUTOMAILEMAIL=testbed-automail@ops.utah.cloudlab.us
+TBACTIVEARCHIVE=testbed-active-users-archive@ops.utah.cloudlab.us
+TBUSERSARCHIVE=testbed-users-archive@ops.utah.cloudlab.us
+TBERRORSEMAIL=testbed-errors@ops.utah.cloudlab.us
+TBCOOKIESUFFIX="CLOUDLAB"
+JAILIPBASE=172.17.0.0
+JAILIPMASK=255.240.0.0
+DELAYCAPACITY=1
+BOSSNODE=boss.utah.cloudlab.us
+USERNODE=ops.utah.cloudlab.us
+FSNODE=ops.utah.cloudlab.us
+OURDOMAIN=utah.cloudlab.us
+FSDIR_GROUPS=/groups
+FSDIR_PROJ=/proj
+FSDIR_USERS=/users
+FSDIR_SHARE=/share
+FSDIR_SCRATCH=
+FS_WITH_QUOTAS=""
+WWWHOST=www.utah.cloudlab.us
+TBMAINSITE=0
+THISHOMEBASE=CLOUDLAB
+PLABSUPPORT=0
+PELABSUPPORT=0
+WIKISUPPORT=0
+BUGDBSUPPORT=0
+MAILMANSUPPORT=1
+OPSDBSUPPORT=0
+WINSUPPORT=0
+NSVERIFY=0
+NOSHAREDFS=0
+NFSRACY=0
+SFSSUPPORT=0
+CVSSUPPORT=0
+NFSTRACESUPPORT=0
+ARCHIVESUPPORT=0
+NTPSERVER=ops
+#EXTERNAL_NTPSERVER1=ntp1.emulab.net
+#EXTERNAL_NTPSERVER2=ntp1.emulab.net
+#EXTERNAL_NTPSERVER3=ntp1.emulab.net
+#EXTERNAL_NTPSERVER4=ntp1.emulab.net
+DISABLE_NSE=1
+# This means it is an inner elab!
+#ELABINELAB=1
+# If we can run old images ... depends on whther elvind is installed.
+ELVIN_COMPAT=0
+# XXX hack to work around perl bug
+# Start a multicast IGMP querier
+NEEDMCQUERIER=0
+TBUSEDBI=1
+#
+# SSL Certificate stuff. Used to customize config files in ssl directory.
+# Note that OrganizationalUnit is set in the cnf file.
+# CommonName is typically set to BOSSNODE and emailAddress to TBOPSEMAIL
+#
+SSLCERT_COUNTRY="US"
+SSLCERT_STATE="Utah"
+SSLCERT_LOCALITY="Cloudlab"
+SSLCERT_ORGNAME="Cloudlab Cluster"
+#
+# Network config stuff. Used to generate initial named and dhcpd config files.
+#
+TESTBED_NETWORK=128.110.156.0
+TESTBED_NETMASK=255.255.255.0
+BOSSNODE_IP=128.110.156.4
+USERNODE_IP=128.110.156.34
+FSNODE_IP=128.110.156.34
+CONTROL_ROUTER_IP=128.110.156.1
+CONTROL_NETWORK=128.110.152.0
+CONTROL_NETMASK=255.255.252.0
+PRIVATE_NETWORK=128.110.156.0
+PRIVATE_ROUTER=128.110.156.1
+PRIVATE_NETMASK=255.255.255.224
+PUBLIC_NETWORK=128.110.156.32
+PUBLIC_ROUTER=128.110.156.33
+PUBLIC_NETMASK=255.255.255.224
+DHCPD_DYNRANGE="128.110.152.230 128.110.152.250"
+NAMED_FORWARDERS="155.98.32.70"
+NAMED_ALSONOTIFY="155.98.32.70"
+#
+# Must localize to avoid conflict with outer emulab frisbeed.
+#
+FRISEBEEMCASTADDR="235.4.156"
+FRISEBEEMCASTPORT="6000"
+FRISEBEENUMPORTS="0"
+#
+# Ops can be a VM on boss.
+#
+OPSVM_ENABLE=0
+
+# So we do not conflict with real users.
+MIN_UNIX_UID=2000
+MIN_UNIX_GID=2000
+
+# Which console to use in pxeboot and the MFSes.
+NODECONSOLE="vga"
+
+# Which version of the MFS.
+MFSVERSION="82"
+PROTOGENI_SUPPORT=1
+PROTOGENI_GENIRACK=0
+PROTOGENI_DOMAIN="cloudlab"
+FANCYBANNER=1
+ISOLATEADMINS=0
+EC2META_ENABLE=1
+
+#
+# Fancy new browser in the console support
+#
+BROWSER_CONSOLE_ENABLE=1
+NOVIRTNFSMOUNTS=1
+
+# Image versioning and deltas.
+IMAGEPROVENANCE=1
+IMAGEDELTAS=1
+
+# ZFS.
+WITHZFS=1
+ZFS_ROOT=z
+ZFS_QUOTA_USER="1G"
+ZFS_QUOTA_PROJECT="100G"
+ZFS_QUOTA_GROUP="10G"
+WITHAMD=1
+AMD_ROOT=/.amd_mnt/ops
+
+# Blockstores
+BS_IQN_PREFIX=iqn.2014-11.us.cloudlab.utah

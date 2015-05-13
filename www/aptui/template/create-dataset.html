@@ -1,0 +1,125 @@
+<div class='row'>
+  <div class='col-lg-8 col-lg-offset-2
+              col-md-8 col-md-offset-2
+              col-sm-10 col-sm-offset-1
+              col-xs-12'>
+    <div class='panel panel-default'>
+      <% if (!embedded) { %>
+        <div class='panel-heading'>
+          <h3 class='panel-title'><%= title %></h3>
+	</div>
+      <% } %>
+      <div class='panel-body'>
+	<form id='create_dataset_form'
+              class='form-horizontal' role='form'
+              method='post' action=create_dataset.php'>
+	  <div class='row'>
+	    <div class='col-sm-12'>
+	      <% if (projects) { %>
+	        <% if (projects.length == 1) { %>
+	          <input name="dataset_pid" readonly
+			 value="<%- formfields.dataset_pid %>"
+			 class="form-control format-me"
+			 data-label="Project"
+			 data-key="dataset_pid">
+		<% } else { %>
+		  <select name="dataset_pid"
+			  class='form-control format-me'
+			  data-key="dataset_pid"
+			  data-label="Project"
+			  placeholder='Please Select'>
+		    <% _.each(projects, function(name) { %>
+	              <option 
+			 <% if (_.has(formfields, 'dataset_pid') &&
+			         formfields.dataset_pid == name) { %>
+			     selected
+			 <% } %>
+			 value='<%= name %>'><%= name %>
+		      </option>
+		    <% }); %>
+		  </select>
+		<% } %>
+	      <% } %>
+	      <input name="dataset_name"
+		     value="<%- formfields.dataset_name %>"
+		     class="form-control format-me"
+		     data-key="dataset_name"
+		     data-label="Name"
+		     placeholder="alphanumeric, no spaces" type="text">
+	      <input name="dataset_size"
+		     value="<%- formfields.dataset_size %>"
+		     class="form-control format-me"
+		     data-key="dataset_size"
+		     data-label="Size"
+		     placeholder="eg: NNN(MB|GB|TB)"
+		     type="text">
+	      <div class='format-me' data-key='dataset_type'
+		   data-label="Type">
+                  <label class='radio-inline'>
+                    <input type='radio' name='dataset_type'
+			   id='dataset_type_stdataset'
+		             <% if (formfields.dataset_type == "stdataset") {
+				%>checked<% } %>
+			     value='stdataset'> Short term
+    	          </label>
+                  <label class='radio-inline'>
+                    <input type='radio' name='dataset_type'
+			   id='dataset_type_ltdataset'
+		             <% if (formfields.dataset_type == "ltdataset") {
+				%>checked<% } %>
+			     value='ltdataset'> Long term
+    	          </label>
+	      </div>
+	      <div id='dataset_expires_div'
+		   <% if (formfields.dataset_type == "ltdataset") {
+		      %> class='hidden' <% } %> >
+		<input name="dataset_expires"
+		       style='position: relative; z-index:1000;'
+		       id='dataset_expires'
+		       value="<%- formfields.dataset_expires %>"
+		       class="form-control format-me"
+		       data-key="dataset_expires"
+		       data-label="Expires"
+		       placeholder="MM/DD/YYYY"
+		       type="text">
+	      </div>
+	      <select name="dataset_fstype"
+		      class="form-control format-me"
+		      data-key="dataset_fstype"
+		      data-label="FS Type">
+		<% _.each(fstypes, function(name) { %>
+	          <option 
+		     <% if (_.has(formfields, 'dataset_fstype') &&
+			formfields.dataset_fstype == name) { %>
+		     selected
+		     <% } %>
+		     value='<%= name %>'><%= name %>
+		  </option>
+		<% }); %>
+	      </select>
+              <button class='btn btn-primary btn-sm pull-right'
+                      id='dataset_submit_button'
+                      type='submit' name='create'>Create</button>
+	    </div>
+	  </div>
+	</form>
+      </div>
+    </div>
+    <center><a href='https://wiki.emulab.net/wiki/EmulabStorage'>
+	More about Datasets</a></center>
+    <!-- place to hang the modals for now -->
+    <!-- This is the Please Wait modal -->
+    <div id='waitwait-modal' class='modal fade'>
+      <div class='modal-dialog'>
+	<div class='modal-content'>
+	  <div class='modal-header'>
+            <center><h3>Please Wait</h3></center>
+	  </div>
+	  <div class='modal-body'>
+            <center><img src='images/spinner.gif' /></center>
+	  </div>
+	</div>
+      </div>
+    </div>
+  </div>
+</div>

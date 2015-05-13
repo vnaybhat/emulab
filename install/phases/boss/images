@@ -1,0 +1,156 @@
+#
+# 
+#
+use strict;
+use libinstall;
+use installvars;
+use EmulabConstants;
+
+my $UTAHURL       = "http://www.emulab.net/downloads";
+my $DESCRIPTORS   = "$TOP_SRCDIR/install/descriptors-v3.xml";
+my $GENDEV        = "$TOP_SRCDIR/install/descriptors-gendev.xml";
+my @STDIMAGES     = ("FBSD82-STD", "FEDORA15-STD");
+my @MBRS          = ("emulab-mbr.dd", "emulab-mbr2.dd", "emulab-mbr3.dd");
+my $STDIMAGESURL  = "$UTAHURL/images-STD";
+
+sub Install($$$)
+{
+    my ($server, $isupdate, $impotent) = @_;
+
+    # Replace if this script does an update for ip/domain.
+    return 0
+	if ($isupdate);
+
+    # Others for the rack.
+    if ($PROTOGENI_GENIRACK) {
+	push(@STDIMAGES, "UBUNTU12-64-STD");
+	push(@STDIMAGES, "UBUNTU11-64-STD");
+	push(@STDIMAGES, "FBSD91-STD");
+    }
+    #
+    # XXX don't want to risk breaking GENIRACK, so only do this otherwise.
+    #
+    # XXX we should really download: FBSD83-64-STD, FEDORA15-64-STD,
+    # UBUNTU10-STD-FW, and the Linux MFSes that are also part of the
+    # default descriptors, but downloading images takes a long time
+    # so we keep the number of images to a minimum.
+    #
+    else {
+	@STDIMAGES = ("FBSD83-STD", "FEDORA15-STD");
+	$DESCRIPTORS = "$TOP_SRCDIR/install/descriptors-v4.xml";
+    }
+
+    Phase "IDs", "Setting up Images and OSs", sub {
+	if ($PROTOGENI_GENIRACK) {
+	    require NodeType;
+	    
+	    #
+	    # Load up the nodetype. It will be the same on every machine,
+	    # and if we do it before loading the descriptors, then we
+	    # do not have to go back and change the type mappings.
+	    #
+	    my $NODETYPE     = "dl360";
+	    my $CREATETYPE   = "$PREFIX/bin/editnodetype";
+	    my $NODETYPEXML  = "$TOP_SRCDIR/install/genirack/nodetype.xml";
+	    
+	    Phase "nodetype", "Creating Protogeni nodetype", sub {
+		my $nodetype = NodeType->Lookup($NODETYPE);
+		PhaseSkip("already created")
+		    if (defined($nodetype));
+		ExecQuietFatal("$SUDO -u $PROTOUSER ".
+			       "         $WAP $CREATETYPE $NODETYPEXML");
+	    };
+	}
+	
+	#
+	# Load up the initial descriptors. 
+	# Load up the images from boss.
+	#
+	Phase "descriptors", "Loading the Image and OS IDs", sub {
+	    ExecQuietFatal("cd $TOP_OBJDIR/install; ".
+			   "   $SUDO -u $PROTOUSER $WAP ".
+			   "   perl load-descriptors -a $DESCRIPTORS");
+	};
+	Phase "gendev", "Loading additional OS IDs", sub {
+	    ExecQuietFatal("cd $TOP_OBJDIR/install; ".
+			   "   $SUDO -u $PROTOUSER $WAP ".
+			   "   perl load-descriptors $GENDEV");
+	};
+	foreach my $imagename (@STDIMAGES) {
+	    my $localfile = "$PREFIX/images/${imagename}.ndz";
+	    my $url       = "$STDIMAGESURL/${imagename}.ndz";
+	    
+	    Phase "$imagename", "Fetching $imagename. Patience!", sub {
+		DoneIfExists($localfile);
+		FetchFileFatal($url, $localfile);
+	    };
+	    
+	    $localfile = "$PREFIX/images/${imagename}.xml";
+	    $url       = "$STDIMAGESURL/${imagename}.xml";
+	    
+	    Phase "${imagename}_xml", "Fetching $imagename metadata", sub {
+		DoneIfExists($localfile);
+		FetchFileFatal($url, $localfile);
+	    };
+
+	    Phase "${imagename}_load", "Loading the image descriptor.", sub {
+		ExecQuietFatal("cd $TOP_OBJDIR/install; ".
+			       "   $SUDO -u $PROTOUSER $WAP ".
+			       "   perl load-descriptors -a $localfile");
+	    };
+
+	    #
+	    # XXX the metadata file may not contain any or all of the newer
+	    # DB state. So we update the metadata using imagevalidate.
+	    #
+	    Phase "${imagename}_validate", "Validating DB info for image.",sub {
+		my $iname = TBOPSPID() . "/" . $imagename;
+		ExecQuietFatal("$SUDO -u $PROTOUSER ".
+			       "$PREFIX/sbin/imagerelease -f -m $iname");
+		ExecQuietFatal("$SUDO -u $PROTOUSER ".
+			       "$PREFIX/sbin/imagevalidate -uq $iname");
+	    };
+	}
+	foreach my $mbr (@MBRS) {
+	    my $localfile = "$PREFIX/images/$mbr";
+	    my $url       = "$UTAHURL/$mbr";
+	    
+	    Phase "$mbr", "Fetching $mbr.", sub {
+		DoneIfExists($localfile);
+		FetchFileFatal($url, $localfile);
+	    };
+	}
+	#
+	# The sitevar is how the reload daemon knows what to reload nodes
+	# with, by default. Now a comma separated list.
+	#
+	my $idlist = join(",", @STDIMAGES);
+	
+	Phase "sitevar", "Setting sitevar $DEFAULTIMAGESITEVAR", sub {
+	    ExecQuietFatal("$PREFIX/sbin/setsitevar ".
+			   "'$DEFAULTIMAGESITEVAR' '$idlist'");
+	};
+
+	if ($PROTOGENI_GENIRACK) {
+	    #
+	    # Load up second half of the nodetype, which defines the osids
+	    # and images it needs, which has to be done after the above.
+	    #
+	    my $NODETYPE     = "dl360";
+	    my $CREATETYPE   = "$PREFIX/bin/editnodetype";
+	    my $NODETYPEXML  = "$TOP_SRCDIR/install/genirack/nodetypeB.xml";
+	    
+	    Phase "nodetype", "Creating Protogeni nodetype", sub {
+		ExecQuietFatal("$SUDO -u $PROTOUSER ".
+			       "         $WAP $CREATETYPE $NODETYPEXML");
+	    };
+	}
+	
+	PhaseSucceed("done")
+    };
+    return 0;
+}
+
+# Local Variables:
+# mode:perl
+# End:

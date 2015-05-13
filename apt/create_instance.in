@@ -1,0 +1,720 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2008-2014 University of Utah and the Flux Group.
+# 
+# {{{GENIPUBLIC-LICENSE
+# 
+# GENI Public License
+# 
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and/or hardware specification (the "Work") to
+# deal in the Work without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Work, and to permit persons to whom the Work
+# is furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Work.
+# 
+# THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE WORK OR THE USE OR OTHER DEALINGS
+# IN THE WORK.
+# 
+# }}}
+#
+use strict;
+use English;
+use Getopt::Std;
+use XML::Simple;
+use File::Temp qw(tempfile :POSIX );
+use Data::Dumper;
+use Cwd qw(realpath);
+
+#
+# Create a quick VM.
+# 
+sub usage()
+{
+    print "Usage: quickvm [-u uuid] [-a aggregate] <xmlfile>\n";
+    exit(1);
+}
+my $optlist = "dvu:a:t:f";
+my $debug   = 0;
+my $verbose = 1;
+my $utahddc = 1;
+my $DDCURN  = "urn:publicid:IDN+utahddc.geniracks.net+authority+cm";
+my $xmlfile;
+my $webtask;
+my $webtask_id;
+my $foreground = 0;
+my $localuser  = 0;
+my $quickuuid;
+my $aggregate;
+my $this_user;
+my $xmlparse;
+
+# Protos
+sub fatal($);
+sub UserError($);
+sub SnapShot($$$);
+sub GenCredentials($$$$);
+
+#
+# Configure variables
+#
+my $TB		  = "@prefix@";
+my $TBOPS         = "@TBOPSEMAIL@";
+my $TBLOGS        = "@TBLOGSEMAIL@";
+my $OURDOMAIN     = "@OURDOMAIN@";
+my $MAINSITE      = @TBMAINSITE@;
+my $PGENIDOMAIN   = "@PROTOGENI_DOMAIN@";
+my $SACERT	  = "$TB/etc/genisa.pem";
+my $CMCERT	  = "$TB/etc/genicm.pem";
+my $SSHKEYGEN     = "/usr/bin/ssh-keygen";
+my $SSHSETUP      = "$TB/sbin/aptssh-setup";
+my $ADDPUBKEY     = "$TB/sbin/addpubkey";
+my $UPDATEGENIUSER= "$TB/sbin/protogeni/updategeniuser";
+
+# un-taint path
+$ENV{'PATH'} = '/bin:/usr/bin:/usr/local/bin:/usr/site/bin';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Turn off line buffering on output
+#
+$| = 1; 
+
+# Load the Testbed support stuff.
+use lib "@prefix@/lib";
+use libtestbed;
+use libaudit;
+use APT_Profile;
+use APT_Instance;
+use APT_Geni;
+use User;
+use OSinfo;
+use emutil;
+use GeniDB;
+use GeniUser;
+use GeniCertificate;
+use GeniCredential;
+use GeniSlice;
+use GeniAuthority;
+use GeniHRN;
+use Genixmlrpc;
+use GeniResponse;
+use GeniXML;
+use WebTask;
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"a"})) {
+    $aggregate = $options{"a"};
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"v"})) {
+    $verbose = 1;
+}
+if (defined($options{"f"})) {
+    $foreground = 1;
+}
+if (defined($options{"t"})) {
+    $webtask_id = $options{"t"};
+}
+if (defined($options{"u"})) {
+    $quickuuid = $options{"u"};
+}
+if (@ARGV < 1) {
+    usage();
+}
+$xmlfile = shift(@ARGV);
+
+#
+# Check the filename when invoked from the web interface; must be a
+# file in /tmp.
+#
+if (getpwuid($UID) ne "nobody") {
+    $this_user = User->ThisUser();
+
+    if (! defined($this_user)) {
+	fatal("You ($UID) do not exist!");
+    }
+    $localuser = 1;
+}
+if (!defined($this_user) || !$this_user->IsAdmin()) {
+    if ($xmlfile =~ /^([-\w\.\/]+)$/) {
+	$xmlfile = $1;
+    }
+    else {
+	fatal("Bad data in pathname: $xmlfile");
+    }
+
+    # Use realpath to resolve any symlinks.
+    my $translated = realpath($xmlfile);
+    if ($translated =~ /^(\/tmp\/[-\w\.\/]+)$/) {
+	$xmlfile = $1;
+    }
+    else {
+	fatal("Bad data in translated pathname: $xmlfile");
+    }
+}
+
+# Email record.
+if (! $debug) {
+    AuditStart(0, undef, LIBAUDIT_LOGTBLOGS()|LIBAUDIT_LOGONLY());
+    AddAuditInfo("cc", "aptnet-logs\@flux.utah.edu");
+}
+
+# Connect to the SA DB.
+DBConnect(GENISA_DBNAME());
+
+#
+# Load the SA cert to act as caller context.
+#
+my $sa_certificate = GeniCertificate->LoadFromFile($SACERT);
+if (!defined($sa_certificate)) {
+    fatal("Could not load certificate from $SACERT\n");
+}
+my $sa_authority = GeniAuthority->Lookup($sa_certificate->urn());
+if (!defined($sa_authority)) {
+    fatal("Could not load SA authority object");
+}
+
+#
+# We want to contact our local CM to create the sliver.
+# We use the normal XMLRPC route.
+#
+my $context = Genixmlrpc->Context($sa_certificate);
+if (!defined($context)) {
+    fatal("Could not create context to talk to CM");
+}
+Genixmlrpc->SetContext($context);
+
+#
+# Load the CM authority, since that is who we talk to.
+#
+my $CMURN;
+
+if (defined($aggregate)) {
+    $CMURN = $aggregate;
+}
+elsif ($utahddc) {
+    $CMURN = $DDCURN;
+}
+else {
+    my $cm_certificate = GeniCertificate->LoadFromFile($CMCERT);
+    if (!defined($cm_certificate)) {
+	fatal("Could not load certificate from $CMCERT\n");
+    }
+    $CMURN = $cm_certificate->urn();
+}
+my $cm_authority = GeniAuthority->Lookup($CMURN);
+if (!defined($cm_authority)) {
+    $cm_authority = GeniAuthority->CreateFromRegistry("cm", $CMURN);
+    if (!defined($cm_authority)) {    
+	fatal("Could not load CM authority object");
+    }
+}
+
+#
+# Must wrap the parser in eval since it exits on error.
+#
+$xmlparse = eval { XMLin($xmlfile,
+			 VarAttr => 'name',
+			 ContentKey => '-content',
+			 SuppressEmpty => undef); };
+fatal($@)
+    if ($@);
+
+#
+# Make sure all the required arguments were provided.
+#
+foreach my $key ("username", "email", "profile") {
+    fatal("Missing required attribute '$key'")
+	if (! (exists($xmlparse->{'attribute'}->{"$key"}) &&
+	       defined($xmlparse->{'attribute'}->{"$key"}) &&
+	       $xmlparse->{'attribute'}->{"$key"} ne ""));
+}
+
+#
+# Gather up args and sanity check.
+#
+my ($value, $user_urn, $user_uid, $user_hrn, $user_email,
+    $sshkey, $profile, $version);
+
+#
+# Username and email has to be acceptable to Emulab user system.
+#
+$value = $xmlparse->{'attribute'}->{"username"}->{'value'};
+if (! TBcheck_dbslot($value, "users", "usr_name",
+		     TBDB_CHECKDBSLOT_WARN|TBDB_CHECKDBSLOT_ERROR)) {
+    fatal("Illegal username: $value");
+}
+$user_uid = $value;
+$user_urn = GeniHRN::Generate("$OURDOMAIN", "user", $user_uid);
+$user_hrn = "${PGENIDOMAIN}.${user_uid}";
+
+$value = $xmlparse->{'attribute'}->{"email"}->{'value'};
+if (! TBcheck_dbslot($value, "users", "usr_email",
+		     TBDB_CHECKDBSLOT_WARN|TBDB_CHECKDBSLOT_ERROR)) {
+    fatal("Illegal email address: $value");
+}
+$user_email = $value;
+
+#
+# Not many choices; see if it exists.
+#
+$value = $xmlparse->{'attribute'}->{"profile"}->{'value'};
+# This is a safe lookup.
+my $profile_object = APT_Profile->Lookup($value);
+if (!defined($profile_object)) {
+    fatal("No such profile: $value");
+}
+my $rspecstr = $profile_object->CheckFirewall(!$localuser);
+$profile = $profile_object->profileid();
+$version = $profile_object->version();
+
+#
+# Use ssh-keygen to see if the key is valid and convertable. We first
+# try to get the fingerprint, which will tells us if its already in
+# openssh format. If not, try to convert it.
+#
+if (exists($xmlparse->{'attribute'}->{"sshkey"}) &&
+    defined($xmlparse->{'attribute'}->{"sshkey"}) &&
+    $xmlparse->{'attribute'}->{"sshkey"} ne "") {
+    $sshkey = $xmlparse->{'attribute'}->{"sshkey"}->{'value'};
+    my ($fh, $keyfile) = tempfile(UNLINK => 0);
+    print $fh $sshkey;
+
+    if (system("$SSHKEYGEN -l -f $keyfile >/dev/null 2>/dev/null")) {
+	if (! open(KEYGEN, "$SSHKEYGEN -i -f $keyfile 2>/dev/null |")) {
+	    fatal("Could not start ssh-keygen");
+	}
+	$sshkey = <KEYGEN>;
+	if (!close(KEYGEN)) {
+	    UserError("Could not parse ssh key!");
+	}
+    }
+    close($fh);
+    unlink($keyfile);
+}
+chomp($sshkey)
+    if (defined($sshkey));
+
+#
+# See if the GeniUser exists. Create if not, but that means we
+# have to create an ssl certificate (which the user will never see)
+# so that we can operate on behalf of the user (via speaksfor).
+#
+# Note that we want to check for the user local account ahead of
+# SA account, to bypass their guest account that might still be
+# in the table.
+#
+my $geniuser;
+
+if ($localuser) {
+    my $emulab_user = User->Lookup($user_uid);
+    
+    #
+    # Hmm, users with real accounts who never used Geni, but now want
+    # to use APT/Cloud, have no encrypted SSL certificate. Rather then
+    # force them through the web ui (and have to explain it), create one
+    # for them using a random passphrase. The user will not know the
+    # passphrase, but for most users it will not matter.
+    #
+    # This is also going to catch expired certificates, we will regenerate
+    # them using the existing passphrase.
+    #
+    if ($emulab_user->HasValidEncryptedCert() == 0 &&
+	$emulab_user->GenEncryptedCert()) {
+	fatal("Could not (re)generate encrypted certificate");
+    }
+    # Now this will work; without a certificate, this would fail.
+    if (defined($emulab_user)) {
+	$geniuser = GeniUser::LocalUser->Create($emulab_user);
+    }
+}
+else {
+    $geniuser = GeniUser->Lookup($user_urn);
+
+    #
+    # In Utah, check for alternate SA
+    #
+    if (!defined($geniuser) && $MAINSITE) {
+	$user_urn = GeniHRN::Generate("aptlab.net", "user", $user_uid);
+	$user_hrn = "aptlab.${user_uid}";
+	$geniuser = GeniUser->Lookup($user_urn, 0);
+    }
+}
+if (!defined($geniuser)) {
+    if ($localuser) {
+	fatal("Could not lookup local user $user_urn");
+    }
+    
+    #
+    # Do not allow overlap with local users.
+    #
+    if (User->Lookup($user_uid)) {
+	fatal("User $user_uid exists in the local user table");
+    }
+
+    print "Geni user does not exist; creating one ...\n"
+	if ($debug);
+
+    #
+    # Want to remember the auth token we emailed for later.
+    #
+    my $auth_token = $xmlparse->{'attribute'}->{"auth_token"}->{'value'};
+    if ($auth_token !~ /^[\w]+$/) {
+	fatal("Bad auth token: $auth_token");
+    }
+    my $blob = {"urn"      => $user_urn,
+		"hrn"      => $user_hrn,
+		"email"    => $user_email,
+		"showuuid" => 1};
+    if ($MAINSITE) {
+	$blob->{'useaptca'} = 1;
+    }
+    my $certificate = GeniCertificate->Create($blob);
+    fatal("Could not create certificate")
+	if (!defined($certificate));
+
+    $geniuser = GeniUser->Create($certificate, $sa_authority);
+    fatal("Could not create new geni user")
+	if (!defined($geniuser));
+
+    $geniuser->SetAuthToken($auth_token);
+
+    #
+    # Setup browser ssh.
+    #
+    system("$SSHSETUP " . $geniuser->uuid());
+    fatal("Could not create ssh key pair")
+	if ($?);
+}
+my $user_uuid = $geniuser->uuid();
+# So we know this user has dome something lately.
+$geniuser->BumpActivity();
+
+if ($localuser) {
+    my $emulab_user = $geniuser->emulab_user();
+    if ($emulab_user->IsNonLocal()) {
+	#
+	# A user created from a Geni certificate via geni-login. We
+	# ask for the current ssh keys from the MA. They are stored
+	# into the DB by the update script.
+	#
+	system("$UPDATEGENIUSER -s " . $emulab_user->uid());
+	if (0) {
+	    fatal("Could not update ssh keys for nonlocal user");
+	}
+    }
+    elsif (!$emulab_user->isEmulab() && defined($sshkey) &&
+	   !$emulab_user->LookupSSHKey($sshkey)) {
+	#
+	# A local user created via the APT/Cloud interface. Rather then
+	# edit keys via the old web UI, they can change their one key
+	# by putting a new one in the web form. If the gave us a new one,
+	# insert it after deleting the old one. 
+	#
+	$emulab_user->DeleteSSHKeys();
+	my ($fh, $keyfile) = tempfile(UNLINK => 0);
+	print $fh $sshkey;
+
+	if (system("$ADDPUBKEY -u $user_uid -f $keyfile")) {
+	    fatal("Could not add new ssh pubkey");
+	}
+	close($fh);
+	unlink($keyfile);
+    }
+    #
+    # Hmm, users with real accounts who never used Geni, but now want
+    # to use APT/Cloud, have no encrypted SSL certificate. Rather then
+    # force them through the web ui (and have to explain it), create one
+    # for them using a random passphrase. The user will not know the
+    # passphrase, but for most users it will not matter.
+    #
+    # This is also going to catch expired certificates, we will regenerate
+    # them using the existing passphrase.
+    #
+    if ($emulab_user->HasValidEncryptedCert() == 0 &&
+	$emulab_user->GenEncryptedCert()) {
+	fatal("Could not (re)generate encrypted certificate");
+    }
+}
+elsif (!$localuser && defined($sshkey)) {
+    #
+    # Guest user; remember key. For now we accept only one key. We store
+    # it simply so we can display it again for the user in the web interface.
+    # We allow key reuse for existing users, see above.
+    #
+    $geniuser->DeleteKeys();
+    $geniuser->AddKey($sshkey);
+}
+# There will be "internal" keys cause we pass the flag asking for them.
+my @sshkeys;
+if ($geniuser->GetKeyBundle(\@sshkeys, 1) < 0 || !@sshkeys) {
+    fatal("No ssh keys to use for $geniuser!");
+}
+
+#
+# Now generate a slice registration and credential
+#
+my $safe_uid    = $user_uid; $safe_uid =~ s/_/-/;
+my $slice_id    = $safe_uid . "-QV" . TBGetUniqueIndex('next_quickvm', 1);
+my $slice_urn   = GeniHRN::Generate($OURDOMAIN, "slice", $slice_id);
+my $slice_hrn   = "${PGENIDOMAIN}.${slice_id}";
+my $SERVER_NAME = (exists($ENV{"SERVER_NAME"}) ? $ENV{"SERVER_NAME"} : "");
+
+print STDERR "\n";
+print STDERR "User:    $user_urn\n";
+print STDERR "Email:   $user_email" . (!$localuser ? " (guest)" : "") . "\n";
+print STDERR "Profile: " . $profile_object->name() . ":${version}\n";
+print STDERR "Slice:   $slice_urn\n";
+print STDERR "Server:  $SERVER_NAME\n";
+print STDERR "\n";
+print STDERR "$rspecstr\n";
+
+#
+# Make sure slice is unique. Probably retry here at some point. 
+#
+if (GeniSlice->Lookup($slice_hrn) || GeniSlice->Lookup($slice_urn)) {
+    fatal("Could not form a unique slice name");
+}
+	    
+#
+# Generate a certificate for this new slice.
+#
+my $slice_certificate =
+    GeniCertificate->Create({'urn'  => $slice_urn,
+			     'hrn'  => $slice_hrn,
+			     'showuuid' => 1,
+			     'email'=> $user_email});
+
+if (!defined($slice_certificate)) {
+    fatal("Could not generate certificate for $slice_urn");
+}
+# Slice is created as locked.
+my $slice = GeniSlice->Create($slice_certificate,
+			      $geniuser, $sa_authority, undef, 1);
+if (!defined($slice)) {
+    $slice_certificate->Delete();
+    fatal("Could not create new slice object for $slice_urn");
+}
+# These get quick expirations, unless it is a real user.
+if ($slice->SetExpiration(time() + (($localuser ? 16 : 3) * 3600)) != 0) {
+    $slice->Delete();
+    fatal("Could not set the slice expiration for $slice_urn");
+}
+my $slice_uuid = $slice->uuid();
+
+#
+# Generate credentials we need.
+#
+my ($slice_credential, $speaksfor_credential) =
+    APT_Geni::GenCredentials($slice, $geniuser);
+if (! (defined($speaksfor_credential) &&
+       defined($slice_credential))) {
+    $slice->Delete();
+    fatal("Could not generate credentials");
+}
+
+#
+# Got this far, lets create a quickvm record.
+#
+my $quickvm_uuid = (defined($quickuuid) ? $quickuuid : NewUUID());
+if (!defined($quickvm_uuid)) {
+    fatal("Could not generate a new uuid");
+}
+my $instance = APT_Instance->Create({'uuid'         => $quickvm_uuid,
+				     'profile_id'   => $profile,
+				     'profile_version' => $version,
+				     'slice_uuid'   => $slice_uuid,
+				     'creator'      => $geniuser->uid(),
+				     'creator_idx'  => $geniuser->idx(),
+				     'creator_uuid' => $geniuser->uuid(),
+				     'aggregate_urn'=> $CMURN,
+				     'status'       => "created",
+				     'servername'   => $SERVER_NAME});
+if (!defined($instance)) {
+    $slice->Delete();
+    fatal("Could not create instance record for $quickvm_uuid");
+}
+#
+# Create a webtask so that we can store additional information about
+# the sliver while we wait. No worries if this fails.
+#
+$webtask = WebTask->Create($instance->uuid());
+$webtask->AutoStore(1)
+    if (defined($webtask));
+
+#
+# Exit and let caller poll for status.
+#
+if (!$debug) {
+    my $child = fork();
+    if ($child) {
+	# Parent exits but avoid libaudit email.
+	exit(0);
+    }
+    # Let parent exit;
+    sleep(2);
+    # All of the logging magic happens in here.
+    libaudit::AuditFork();
+}
+# Bind the process id.
+$webtask->SetProcessID($PID)
+    if (defined($webtask));
+
+#
+# This creates the sliver and starts it.
+#
+my $response =
+    Genixmlrpc::CallMethod($cm_authority->url(), undef,
+			   "CreateSliver",
+			   { "slice_urn"   => $slice_urn,
+			     "rspec"       => $rspecstr,
+			     "keys"        =>
+				 [{'urn'   => $user_urn,
+				   'login' => $user_uid,
+				   'keys'  => \@sshkeys }],
+			     "credentials" =>
+				 [$slice_credential->asString(),
+				  $speaksfor_credential->asString()]});
+
+if (!defined($response) || $response->code() != GENIRESPONSE_SUCCESS) {
+    $slice->Delete();
+    $instance->SetStatus("failed");
+    if (defined($webtask)) {
+	if (defined($response)) {
+	    $webtask->output($response->output());
+	    $webtask->Exited($response->code());
+	}
+	else {
+	    $webtask->Exited(1);
+	}
+    }
+    fatal("CreateSliver failed: ".
+	  (defined($response) ? $response->output() : "") . "\n");
+}
+
+#
+# We are going to use the manifests table.
+#
+my $manifest = $response->value()->[1];
+if (!defined($manifest)) {
+    $slice->UnLock();
+    $webtask->Exited(1) if (defined($webtask));
+    $instance->SetStatus("failed");
+    fatal("Could not find the manifest in the response!");
+}
+$instance->SetStatus("provisioned");
+$instance->SetManifest($manifest);
+
+#
+# but have to wait for the sliver to be ready, which means polling.
+#
+my $seconds  = 1500;
+my $interval = 15;
+my $ready    = 0;
+my $failed   = 0;
+my $public_url;
+
+while ($seconds > 0) {
+    sleep($interval);
+    $seconds -= $interval;
+    
+    my $response =
+	Genixmlrpc::CallMethod($cm_authority->url(), undef,
+			       "SliverStatus",
+			       { "slice_urn"   => $slice_urn,
+				 "credentials" =>
+				     [$slice_credential->asString(),
+				      $speaksfor_credential->asString()]});
+
+    if (!defined($response) || !defined($response->value()) ||
+	($response->code() != GENIRESPONSE_SUCCESS &&
+	 $response->code() != GENIRESPONSE_BUSY)) {
+	print STDERR "SliverStatus failed";
+	if (defined($response)) {
+	    print STDERR ": " . $response->output();
+	    if (defined($webtask)) {
+		$webtask->output($response->output());
+	    }
+	}
+	print STDERR "\n";
+	$failed = 1;
+	last;
+    }
+    next
+	if ($response->code() == GENIRESPONSE_BUSY);
+
+    my $blob = $response->value();
+    if (exists($blob->{'public_url'})) {
+	$public_url = $blob->{'public_url'};
+    }
+    if ($blob->{'status'} eq "ready") {
+	$ready = 1;
+	last;
+    }
+    elsif ($blob->{'status'} eq "failed") {
+	$failed = 1;
+	last;
+    }
+}
+print STDERR "$slice_urn\n";
+print STDERR "$public_url\n"
+    if (defined($public_url));
+print STDERR "\n";
+print STDERR "$manifest\n\n";
+
+if ($failed || !$ready) {
+    $instance->SetStatus("failed");
+    if (!$ready) {
+	print STDERR "$slice_urn timed out.\n";
+    }
+    else {
+	print STDERR "$slice_urn failed.\n"; 
+    }
+    $webtask->Exited(1) if (defined($webtask));
+}
+else {
+    $instance->SetStatus("ready");
+    $webtask->Exited(0) if (defined($webtask));
+}
+$slice->UnLock();
+exit(0);
+
+sub fatal($) {
+    my ($mesg) = $_[0];
+
+    print STDERR Dumper($xmlparse)
+	if (defined($xmlparse));
+
+    print STDERR "*** $0:\n".
+	         "    $mesg\n";
+    exit(-1);
+}
+sub UserError($) {
+    my($mesg) = $_[0];
+
+    AuditAbort()
+	if (!$debug);
+    print $mesg;
+    exit(1);
+}
+
+

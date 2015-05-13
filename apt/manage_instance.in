@@ -1,0 +1,732 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use English;
+use strict;
+use Getopt::Std;
+use XML::Simple;
+use Data::Dumper;
+use CGI;
+use POSIX ":sys_wait_h";
+use POSIX qw(setsid close);
+
+#
+# Back-end script to manage APT profiles.
+#
+sub usage()
+{
+    print("Usage: manage_instance snapshot instance [imagename node_id]\n");
+    print("Usage: manage_instance consoleurl instance node\n");
+    print("Usage: manage_instance extend instance seconds\n");
+    print("Usage: manage_instance terminate instance\n");
+    print("Usage: manage_instance refresh instance\n");
+    exit(-1);
+}
+my $optlist     = "dt:";
+my $debug       = 0;
+my $webtask_id;
+my $webtask;
+
+#
+# Configure variables
+#
+my $TB		= "@prefix@";
+my $TBOPS       = "@TBOPSEMAIL@";
+my $QUICKVM     = "$TB/sbin/protogeni/quickvm";
+my $VERSIONING  = @PROFILEVERSIONS@;
+
+#
+# Untaint the path
+#
+$ENV{'PATH'} = "$TB/bin:$TB/sbin:/bin:/usr/bin:/usr/bin:/usr/sbin";
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Load the Testbed support stuff.
+#
+use lib "@prefix@/lib";
+use EmulabConstants;
+use emdb;
+use emutil;
+use libtestbed;
+use User;
+use Project;
+use APT_Profile;
+use APT_Instance;
+use APT_Geni;
+use GeniXML;
+use GeniHRN;
+use Genixmlrpc;
+use GeniResponse;
+use GeniSlice;
+use WebTask;
+
+# Protos
+sub fatal($);
+sub DoSnapshot();
+sub DoConsole();
+sub DoTerminate();
+sub DoExtend();
+sub DoRefresh();
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"t"})) {
+    $webtask_id = $options{"t"};
+}
+if (defined($options{"d"})) {
+    $debug++;
+}
+if (@ARGV < 2) {
+    usage();
+}
+my $action   = shift(@ARGV);
+my $uuid     = shift(@ARGV);
+my $instance = APT_Instance->Lookup($uuid);
+if (!defined($instance)) {
+    $instance = APT_Instance->LookupBySlice($uuid);
+}
+if (!defined($instance)) {
+    fatal("No such instance $uuid");
+}
+
+if ($action eq "snapshot") {
+    DoSnapshot();
+}
+if ($action eq "extend") {
+    DoExtend();
+}
+elsif ($action eq "consoleurl") {
+    DoConsole()
+}
+elsif ($action eq "terminate") {
+    DoTerminate()
+}
+elsif ($action eq "refresh") {
+    DoRefresh()
+}
+else {
+    usage();
+}
+exit(0);
+
+#
+# Take a snapshot. Implies a single node instance, for now.
+#
+sub DoSnapshot()
+{
+    my $errmsg;
+    my $logfile;
+    my $errcode        = 1;
+    my $needunlock     = 0;
+    my $old_status     = $instance->status();
+    
+    if ($old_status ne "ready") {
+	fatal("Instance must be in the ready state to take a snapshot");
+    }
+    my $slice = $instance->GetGeniSlice();
+    if (!defined($slice)) {
+	fatal("No slice for quick VM: $uuid");
+    }
+
+    # The web interface (and in the future the xmlrpc interface) sets this.
+    my $this_user = User->ImpliedUser();
+    if (! defined($this_user)) {
+	$this_user = User->ThisUser();
+	if (!defined($this_user)) {
+	    fatal("You ($UID) do not exist!");
+	}
+    }
+    
+    #
+    # If we get an imagename on the command line, the caller is
+    # saying it is responsible. If we do not get one, we create
+    # the name and update the underlying profile with the new image
+    # urn.
+    #
+    my $imagename;
+    my $node_id;
+    my $sliver_urn;
+    my $update_profile = 0;
+    
+    my $profile = APT_Profile->Lookup($instance->profile_id());
+    if (!defined($profile)) {
+	fatal("Could not lookup profile for instance");
+    }
+    if (@ARGV) {
+	$imagename = shift(@ARGV);
+	if (@ARGV) {
+	    $node_id = shift(@ARGV);
+	}
+    }
+    else {
+	$imagename = $profile->name();
+	$update_profile = 1;
+    }
+    
+    #
+    # Sanity check to make sure there is just one node. 
+    #
+    my $manifest = GeniXML::Parse($instance->manifest());
+    if (! defined($manifest)) {
+	fatal("Could not parse manifest");
+    }
+    my @nodes = GeniXML::FindNodes("n:node", $manifest)->get_nodelist();
+    if (!defined($node_id)) {
+	if (@nodes != 1) {
+	    fatal("Too many nodes (> 1) to snapshot");
+	}
+	my ($node)     = @nodes;
+	$sliver_urn = GeniXML::GetSliverId($node);
+    }
+    else {
+	foreach my $node (@nodes) {
+	    my $client_id = GeniXML::GetVirtualId($node);
+	    if ($node_id eq $client_id) {
+		$sliver_urn = GeniXML::GetSliverId($node);
+		last;
+	    }
+	}
+	if (!defined($sliver_urn)) {
+	    fatal("Could not find node '$node_id' in manifest");
+	}
+    }
+    if ($slice->Lock()) {
+	fatal("Slice is busy, cannot lock it");
+    }
+    $needunlock = 1;
+    
+    #
+    # Create the webtask object.
+    #
+    if (defined($webtask_id)) {
+	$webtask = WebTask->LookupOrCreate($instance->uuid(), $webtask_id);
+	# Convenient.
+	$webtask->AutoStore(1);
+    }
+
+    my $authority = $instance->GetGeniAuthority();
+    my $geniuser  = $instance->GetGeniUser();
+    my $context   = APT_Geni::GeniContext();
+    if (! (defined($geniuser) && defined($authority) &&
+	   defined($slice) && defined($context))) {
+	$errmsg = "Internal error getting instance objects";
+	goto bad;
+    }
+    my ($slice_credential, $speaksfor_credential) =
+	APT_Geni::GenCredentials($slice, $geniuser);
+    if (! (defined($speaksfor_credential) && defined($slice_credential))) {
+	$errmsg = "Internal error getting credentials";
+	goto bad;
+    }
+    $instance->SetStatus("imaging");
+
+    my $args = {
+	"slice_urn"   => $slice->urn(),
+	"imagename"   => $imagename,
+	"sliver_urn"  => $sliver_urn,
+	"credentials" => [$slice_credential->asString(),
+			  $speaksfor_credential->asString()],
+    };
+    #
+    # This returns pretty fast, and then the imaging takes place in
+    # the background at the aggregate. 
+    #
+    my $response = Genixmlrpc::CallMethod($authority->url(),
+					  $context, "CreateImage", $args);
+    if (!defined($response)) {
+	$errmsg = "Internal error creating image";
+	$instance->SetStatus($old_status);
+	goto bad;
+    }
+    if ($response->code() != GENIRESPONSE_SUCCESS) {
+	$errmsg = "Could not create image: " . $response->output() . "\n";
+	$instance->SetStatus($old_status);
+	goto bad;
+    }
+    my ($image_urn, $image_url,
+	$version_urn, $version_url) = @{ $response->value() };
+    if (!defined($version_urn)) {
+	$version_urn = $image_urn;
+	$version_url = $image_url
+    }
+    if (defined($webtask)) {
+	$webtask->image_urn($version_urn);
+	$webtask->image_url($version_url);
+    }
+    else {
+	print "$image_urn,$image_url\n";
+    }
+
+    #
+    # Exit and leave child to poll.
+    #
+    if (! $debug) {
+        $logfile = TBMakeLogname("snapshot");
+	
+	if (my $childpid = TBBackGround($logfile)) {
+	    # Parent exits normally, web interface watches.
+	    exit(0);
+	}
+	# Let parent exit;
+	sleep(2);
+    }
+    # Bind the process id. This is important when the caller is
+    # manage_profile, doing a clone.
+    $webtask->SetProcessID($PID)
+	if (defined($webtask));
+
+    #
+    # Poll for a reasonable amount of time.
+    #
+    my $seconds  = 1200;
+    my $interval = 5;
+    my $ready    = 0;
+    my $failed   = 0;
+    # do not want this in the args for calls below.
+    delete($args->{'sliver_urn'});
+    delete($args->{'imagename'});
+    # But we need this;
+    $args->{'image_urn'} = $image_urn;
+
+    while ($seconds > 0) {
+	sleep($interval);
+	$seconds -= $interval;
+    
+	my $response =
+	    Genixmlrpc::CallMethod($authority->url(),
+				   $context, "SliverStatus", $args);
+
+	if ($response->code() != GENIRESPONSE_SUCCESS &&
+	    $response->code() != GENIRESPONSE_BUSY) {
+	    $errmsg = "Sliverstatus failed: ". $response->output() . "\n";
+	    $failed = 1;
+	    last;
+	}
+	next
+	    if ($response->code() == GENIRESPONSE_BUSY);
+
+	my $blob = $response->value();
+	if (defined($webtask)) {
+	    #
+	    # Need to find the sliver inside the blob.
+	    #
+	    my $sliverblob = $blob->{'details'}->{$sliver_urn};
+	    if (defined($sliverblob)) {
+		$webtask->state($sliverblob->{'state'});
+		$webtask->rawstate($sliverblob->{'rawstate'});
+	    }
+	}
+	if ($blob->{'status'} eq "failed") {
+	    $failed = 1;
+	    last;
+	}
+	#
+	# We are watching for the image status to report ready or failed.
+	#
+	$response =
+	    Genixmlrpc::CallMethod($authority->url(),
+				   $context, "ImageInfo", $args);
+
+	if ($response->code() != GENIRESPONSE_SUCCESS &&
+	    $response->code() != GENIRESPONSE_BUSY) {
+	    $errmsg = "Imageinfo failed: ". $response->output() . "\n";
+	    $failed = 1;
+	    last;
+	}
+	next
+	    if ($response->code() == GENIRESPONSE_BUSY);
+
+	$blob = $response->value();
+	if (defined($webtask)) {
+	    $webtask->image_size($blob->{'size'}) 	
+		if (exists($blob->{'size'}));
+	    $webtask->image_status($blob->{'status'})
+		if (exists($blob->{'status'}));
+	}
+	if ($blob->{'status'} eq "ready") {
+	    $ready = 1;
+	    last;
+	}
+	elsif ($blob->{'status'} eq "failed") {
+	    $failed = 1;
+	    last;
+	}
+    }
+    if ($failed) {
+	$errmsg = "Imaging failed"
+	    if (!defined($errmsg));
+	$errcode = 1;
+	goto bad;
+    }
+    elsif (!$ready) {
+	$errmsg  = "Imaging timed out";
+	$errcode = 60;
+	goto bad;
+    }
+    elsif ($update_profile) {
+	#
+	# If successful, we create a new version of the profile and
+	# update the rspec to reflect the new image version. Note
+	# that we expect the CM is doing image versioning, so do not
+	# bother to check if the image version is actually new.
+	#
+	if ($VERSIONING) {
+	    $profile = $profile->NewVersion($this_user);
+	    if (!defined($profile)) {
+		print STDERR "Could not create new profile version\n";
+		$webtask->Exited(70)
+		    if (defined($webtask));
+		exit(1);
+	    }
+	}
+	$profile->UpdateDiskImage($image_urn);
+    }
+    $instance->SetStatus("ready");
+    # We garbage collect these later, so anyone waiting has a chance
+    # to see the exit status
+    $webtask->Exited(0)
+	if (defined($webtask));
+    $slice->UnLock();
+    unlink($logfile)
+	if (defined($logfile));
+    exit(0);
+  bad:
+    print STDERR "$errmsg\n";
+    if (defined($errmsg)) {
+	$webtask->Exited($errcode);
+	$webtask->output($errmsg);
+    }
+    $slice->UnLock();
+    if (defined($logfile)) {
+	$instance->Brand()->SendEmail($instance->Brand()->OpsEmailAddress(),
+				      "Snapshot failed",
+				      "Error taking snapshot of $instance:\n\n".
+				      "$errmsg\n",
+				      $instance->Brand()->OpsEmailAddress(),
+				      undef, $logfile);
+	unlink($logfile);
+    }
+    exit($errcode);
+}
+
+#
+# Ask the console URL for a node in an instance.
+#
+sub DoConsole()
+{
+    usage()
+	if (!@ARGV);
+    my $node_id = shift(@ARGV);
+
+    if (defined($webtask_id)) {
+	$webtask = WebTask->LookupOrCreate(undef, $webtask_id);
+	if (!defined($webtask)) {
+	    fatal("Could not lookup/create webtask for $webtask_id");
+	}
+    }
+    
+    #
+    # Sanity check to make sure the node is really in the rspec, since
+    # we need its sliver urn to ask for the console url.
+    #
+    my $sliver_urn;
+    my $manifest = GeniXML::Parse($instance->manifest());
+    if (! defined($manifest)) {
+	fatal("Could not parse manifest");
+    }
+    my @nodes = GeniXML::FindNodes("n:node", $manifest)->get_nodelist();
+    foreach my $node (@nodes) {
+	my $client_id = GeniXML::GetVirtualId($node);
+	if ($node_id eq $client_id) {
+	    $sliver_urn = GeniXML::GetSliverId($node);
+	}
+    }
+    if (!defined($sliver_urn)) {
+	fatal("Could not find node '$node_id' in manifest");
+    }
+    my $response = $instance->ConsoleURL($sliver_urn);
+    if (!defined($response)) {
+	fatal("RPC Error calling ConsoleURL");
+    }
+    if (defined($webtask)) {
+	$webtask->output($response->output());
+	$webtask->code($response->code());
+	$webtask->value($response->value())
+	    if (! $response->code());
+	$webtask->Exited($response->code());
+	exit(0);
+    }
+    # For command line operation too.
+    if ($response->code()) {
+	fatal($response->output());
+    }
+    print $response->value() . "\n";
+    exit(0);
+}
+
+#
+# Terminate
+#
+sub DoTerminate()
+{
+    my $errmsg;
+    my $logfile;
+    
+    my $slice = $instance->GetGeniSlice();
+    if (!defined($slice)) {
+	goto killit;
+    }
+    #
+    # Lock the slice in case it is doing something else, like taking
+    # a disk image.
+    #
+    if ($slice->Lock()) {
+	fatal("Slice is busy, cannot lock it");
+    }
+    # So we can communicate errors back to the web interface.
+    if (defined($webtask_id)) {
+	$webtask = WebTask->LookupOrCreate($instance->uuid(), $webtask_id);
+	if (!defined($webtask)) {
+	    $slice->UnLock();
+	    fatal("Could not lookup/create webtask for $webtask_id");
+	}
+	$webtask->AutoStore(1);
+    }
+    my $old_status = $instance->status();
+    $instance->SetStatus("terminating");
+
+    #
+    # Exit and let caller poll for status.
+    #
+    if (defined($webtask) && !$debug) {
+        $logfile = TBMakeLogname("terminate");
+	
+	if (my $childpid = TBBackGround($logfile)) {
+	    my $status = 0;
+	    #
+	    # Wait a couple of seconds to see if there is going to be an
+	    # immediate error. Then return and let it continue to run. This
+	    # allows the web server to see quick errors. Later errors will
+	    # have to be emailed. 
+	    #
+	    sleep(3);
+	    my $foo = waitpid($childpid, &WNOHANG);
+	    if ($foo) {
+		$status = $? >> 8;
+	    }
+	    exit($status);
+	}
+    }
+    my $response = $instance->Terminate();
+    if (!defined($response)) {
+	$errmsg = "RPC Error calling Terminate";
+	goto bad;
+    }
+
+    # SEARCHFAILED is success.
+    if ($response->code() != GENIRESPONSE_SUCCESS &&
+	$response->code() != GENIRESPONSE_SEARCHFAILED) {
+	if ($response->code() == GENIRESPONSE_BUSY) {
+	    $errmsg = "Slice was busy for too long; try again later?";
+	    goto bad;
+	}
+	$errmsg = "Could not delete slice: ". $response->output();
+	goto bad;
+    }
+    $slice->Delete();
+    $instance->RecordHistory();
+  killit:
+    $instance->Delete();
+    $webtask->Exited(0)
+	if (defined($webtask));
+    unlink($logfile)
+	if (defined($logfile));
+    exit(0);
+  bad:
+    print STDERR $errmsg . "\n";
+    $instance->SetStatus($old_status);
+    $slice->UnLock();
+    if (defined($webtask)) {
+	$webtask->output($errmsg);
+	$webtask->Exited(1);
+    }
+    if (defined($logfile)) {
+	$instance->Brand()->SendEmail($instance->Brand()->OpsEmailAddress(),
+				      "Unable to terminate instance $uuid",
+				      "Error terminating $instance:\n\n".
+				      "$errmsg\n",
+				      $instance->Brand()->OpsEmailAddress(),
+				      undef, $logfile);
+	unlink($logfile);
+    }
+    exit(1);
+}
+
+#
+# Extend.
+#
+sub DoExtend()
+{
+    usage()
+	if (!@ARGV);
+    
+    my $seconds = shift(@ARGV);
+    if ($seconds !~ /^\d*$/) {
+	usage();
+    }
+
+    if ($instance->status() eq "failed") {
+	fatal("Cannot extend failed instance!");
+    }
+
+    my $slice = $instance->GetGeniSlice();
+    if (!defined($slice)) {
+	fatal("No slice for instance!");
+    }
+    #
+    # Lock the slice in case it is doing something else, like taking
+    # a disk image.
+    #
+    if ($slice->Lock()) {
+	fatal("Slice is busy, cannot lock it");
+    }
+    # Save in case of error.
+    my $oldexpires = $slice->expires();
+
+    # Need to update slice before creating new credential. 
+    $slice->AddToExpiration($seconds);
+    my $new_expires = $slice->ExpirationGMT();
+    
+    my $response = $instance->Extend($new_expires);
+    if (!defined($response)) {
+	$slice->UnLock();
+	fatal("Internal error calling Extend");
+    }
+    if ($response->code() != GENIRESPONSE_SUCCESS) {
+	# Reset back to original expiration, sorry.
+	$slice->SetExpiration($oldexpires);
+	$slice->UnLock();
+	# This is something the user should see.
+	if ($response->code() == GENIRESPONSE_REFUSED) {
+	    print STDERR $response->output() . "\n";
+	    # For web interface.
+	    exit(1);
+	}
+	fatal("Failed to extend slice: ". $response->output())
+    }
+    $slice->UnLock();
+    exit(0);
+}
+
+#
+# Refresh; ask the aggregate for status and set the instance status
+# accordingly.
+#
+sub DoRefresh()
+{
+    my $errmsg;
+    
+    my $slice = $instance->GetGeniSlice();
+    if (!defined($slice)) {
+	print STDERR "No slice for instance\n";
+	goto killit;
+    }
+    #
+    # Lock the slice in case it is doing something else, like taking
+    # a disk image.
+    #
+    if ($slice->Lock()) {
+	fatal("Slice is busy, cannot lock it");
+    }
+
+    my $response = $instance->SliceStatus();
+    if (!defined($response)) {
+	$errmsg = "RPC Error calling SliceStatus";
+	goto bad;
+    }
+
+    if ($response->code() != GENIRESPONSE_SUCCESS) {
+	if ($response->code() == GENIRESPONSE_SEARCHFAILED) {
+	    print STDERR "Slice is gone; killing instance";
+	    $slice->Delete();
+	}
+	if ($response->code() == GENIRESPONSE_BUSY) {
+	    $errmsg = "Slice was busy; try again later";
+	    goto bad;
+	}
+	$errmsg = "Could not get status: ". $response->output();
+	goto bad;
+    }
+    my $blob = $response->value();
+    if ($blob->{'status'} eq "ready") {
+	$instance->SetStatus("ready");
+    }
+    elsif ($blob->{'status'} eq "failed") {
+	$instance->SetStatus("failed");
+    }
+    $slice->UnLock();
+    exit(0);
+  killit:
+    $instance->RecordHistory();
+    $instance->Delete();
+    exit(0);
+  bad:
+    $slice->UnLock();
+    print STDERR $errmsg . "\n";
+    exit(1);
+}
+
+sub fatal($)
+{
+    my ($mesg) = @_;
+
+    if (defined($webtask)) {
+	$webtask->output($mesg);
+	$webtask->code(-1);
+    }
+    print STDERR "*** $0:\n".
+	         "    $mesg\n";
+    # Exit with negative status so web interface treats it as system error.
+    exit(-1);
+}
+
+sub escapeshellarg($)
+{
+    my ($str) = @_;
+
+    $str =~ s/[^[:alnum:]]/\\$&/g;
+    return $str;
+}
+

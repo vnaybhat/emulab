@@ -1,0 +1,401 @@
+/* Sticky footer styles
+-------------------------------------------------- */
+html,
+body {
+  height: 100%;
+  /* The html and body elements cannot have any padding or margin. */
+}
+
+/* Wrapper for page content to push down footer */
+#wrap {
+  min-height: 100%;
+  height: auto !important;
+  height: 100%;
+  /* Negative indent footer by its height */
+  margin: 0 auto -2.5em;
+  /* Pad bottom by footer height */
+  padding: 0 0 2.5em;
+}
+
+.apt-left {
+  float: left;
+}
+
+.apt-right {
+  float: right;
+}
+
+.navbar img {
+  display: block;
+  margin: 0 auto;
+  height: 75px;
+}
+
+.navbar-inner {
+  height: 75px;
+  width: 95%;
+  margin: 0 auto;
+}
+
+.navbar .brand {
+  position: absolute;
+  top:0;
+  left:0;
+  width: 100%;
+}
+
+.navbar-nav > li > a,
+.navbar-nav > li > p {
+  color: #000000;
+  margin-top: 20px;
+}
+
+.navbar-btn.btn-xs,
+.navbar-btn {
+  margin-top: 20px;
+}
+
+.btn-quickvm-home, .btn-quickvm-home:hover {
+  color: #000000;
+  background-color: #D3D3D3;
+  border-color: #357ebd;
+  margin-right: 10px;
+}
+
+.navbar-right li .navbar-btn {
+  margin-left: 10px;
+}
+
+/* Set the fixed height of the footer here */
+#footer {
+  clear: both;
+  font-size: 1.0em;
+  height: 2.5em;
+  padding: 0.5em;
+  color: #ddd;
+  text-align: center;
+}
+
+#footer a {
+  height: 1.0em;
+  color: #ddd;
+}
+
+#footer a:hover {
+  color: #fff;
+}
+
+#footer #elabpower {
+    height: 1.0em;
+}
+
+/* So that containers have some top room */
+.container {
+    margin-top: 15px; !important;
+}
+
+
+#quickvm_topomodal #profile_name {
+  height: 402px;
+  margin-bottom: 0;
+  overflow-y: scroll;
+}
+
+#quickvm_topomodal #profile_name li {
+  cursor: pointer;
+  border-right: 0;
+  border-left: 0;
+  padding-right: 15px;
+  padding-left: 15px;
+}
+
+#quickvm_topomodal #profile_name > li:first-child {
+  border-top: 0;
+}
+
+#quickvm_topomodal #profile_name .selected {
+  background-color: #3276B1;
+  color: #FFF;
+}
+
+#showtopo_container .form-group {
+  margin: 0;
+  height: 402px;
+}
+
+#edit_container .form-group {
+  margin: 0;
+  height: 600px;
+}
+
+#showtopo_nopicker {
+  height: 300px;
+}
+
+#edit_nopicker {
+  height: 500px;
+}
+
+.edit_buttons {
+  float: right;
+  margin-top: 10px;
+}
+
+#edit_nopicker {
+  width: 100%;
+}
+
+#showtopo_div {
+    height: 300px;
+}
+
+#showtopo_statuspage {
+    height: 300px;
+}
+
+@media (min-width: 970px) {
+
+#showtopo_dialog, #edit_dialog {
+  width: 950px;
+}
+
+#showtopo_description {
+  width: 643px;
+}
+
+#showtopo_div {
+  width: 643px;
+}
+#showtopo_nopicker {
+  width: 850px;
+}
+}
+
+@media (max-width: 969px) {
+  .modal-dialog {
+  width: auto;
+}
+}
+
+@media (min-width: 910px) and (max-width: 969px) {
+  #showtopo_description,
+  #showtopo_div {
+  width: 610px;
+}
+  #showtopo_nopicker {
+  width: 800px;
+}
+}
+
+@media (min-width: 850px) and (max-width: 909px) {
+  #showtopo_description,
+  #showtopo_div {
+  width: 560px;
+}
+  #showtopo_nopicker {
+  width: 750px;
+}
+}
+
+@media (min-width: 790px) and (max-width: 849px) {
+  #showtopo_description,
+  #showtopo_div {
+  width: 510px;
+}
+  #showtopo_nopicker {
+  width: 710px;
+}
+}
+
+@media (min-width: 768px) and (max-width: 789px) {
+  #showtopo_description,
+  #showtopo_div {
+  width: 500px;
+}
+  #showtopo_nopicker {
+  width: 700px;
+}
+}
+
+@media (min-width: 740px) and (max-width: 767px) {
+  #showtopo_description,
+  #showtopo_div {
+  width: 470px;
+}
+  #showtopo_nopicker {
+  width: 670px;
+}
+}
+
+@media (min-width: 690px) and (max-width: 739px) {
+  #showtopo_description,
+  #showtopo_div {
+  width: 430px;
+}
+  #showtopo_nopicker {
+  width: 630px;
+}
+}
+
+@media (max-width: 689px) {
+  #showtopo_container > div, #edit_container > div {
+    width: 100%;
+  }
+
+  #showtopo_container .form-group, #edit_container .form-group {
+    height: 180px;
+    border-bottom: 1px solid #DDD;
+  }
+
+  #quickvm_topomodal #profile_name {
+  height: 180px;
+  overflow-y: scroll;
+}
+}
+
+.modal-dialog .modal-content {
+  overflow: hidden;
+}
+
+#showtopo_title h3 {
+  margin-left: 15px;
+  margin-top: 15px;
+}
+
+#quickvm_topomodal #showtopo_container {
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+
+#quickvm_topomodal .modal-header h3 {
+  margin-top: 0;
+  margin-bottom: 0;
+}
+
+#showtopo_buttons {
+  margin-bottom: 10px;
+}
+/*
+#showtopo_div {
+  border: 1px solid #000;
+}
+*/
+.nospaceafter {
+  margin-bottom: 5px;
+}
+
+.text-warning {
+  color: orange;
+}
+.text-danger {
+  color: red;
+}
+.border-none {
+  border: none;
+}
+
+/*
+.panel-body {
+  background-color: #f5f5f5;
+}
+*/
+
+/* Helper */
+.align-center {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+.align-center-inline {
+  display: inline-block;
+  margin-left: auto;
+  margin-right: auto;
+}
+/* These two so the nav tab X looks right. */
+.nav-tabs > li .close {
+  display: inline;
+  margin: -5px 0 0 5px;
+  font-size: 15px;
+}
+/* Smaller nav tabs. */
+.nav > li > a {
+  padding: 5px 5px;
+}
+
+/* Styles for svg diagrams */
+.topomap {
+    display: block;
+    margin: 0 auto;
+}
+.linktext {
+    fill: blue;
+    font: Helvetica;
+    font-size: 12;
+    font-weight: bold;
+}
+.nodetext {
+    fill: black;
+    font: Helvetica;
+    font-size: 12;
+    font-weight: bold;
+}
+.linkline {
+    fill: black;
+    fill-opacity: 1.0;
+    stroke: black;
+    stroke-opacity: 1.0;
+    stroke-width: 1;
+    stroke-linecap: square;
+}
+.nodebox {
+    fill: palegreen;
+    fill-opacity: 1.0;
+    stroke: black;
+    stroke-opacity: 1.0;
+    stroke-width: 2;
+}
+
+.unselectable {
+  -moz-user-select: none;
+  -khtml-user-select: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.sidebyside-form {
+    padding-left:  5px;
+    padding-right: 5px;
+}
+
+blockquote #selected_profile_description {
+    font-size: 14px;
+}
+
+.popover
+{
+    min-width: 350px ! important;
+}
+
+/* Update for better cross browser compat */
+.fade {
+    opacity: 0;
+    -webkit-transition: opacity 0.15s linear;
+    -moz-transition: opacity 0.15s linear;
+    -o-transition: opacity 0.15s linear;
+    transition: opacity 0.15s linear;
+}
+
+/* Update Successful flasher on the manage profile page. */
+.apt-success {
+    position: absolute;
+    z-index: 1000;
+    margin-left: auto;
+    margin-right: auto;
+    width: 300;
+    left: 0;
+    right: 0;
+}
+
+.jacks #canvasContainer, .jacks #topoButtons {
+    background-color: #fff;
+}

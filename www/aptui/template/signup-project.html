@@ -1,0 +1,36 @@
+<div>
+  <div class="form-group" >
+    <div class="" style='padding-left: 15px; margin-bottom: 7px;'>
+      <label class="radio-inline" style='margin-right: 10px;'>
+	<input type="radio" id="startorjoin"
+	       name="formfields[startorjoin]"
+	       value="join"
+	       <% if (formfields.startorjoin == "join") { %>checked<% } %> >
+	Join Existing Project</label>
+      <label class="radio-inline" style='margin-left: 0px;'>
+	<input type="radio" id="startorjoin"
+	       name="formfields[startorjoin]"
+	       value="start"
+	       <% if (formfields.startorjoin == "start") { %>checked<% } %> >
+	Start New Project</label>
+    </div>
+  </div>
+  <input name="formfields[pid]" value="<%- formfields.pid %>"
+	 id="form_join_pid"
+	 class="form-control format-me" data-key="pid"
+	 placeholder="Project Name" type="text">
+  <div id="start_project_rollup"
+    <% if (formfields.startorjoin == "join") { %>class=hidden<% } %> >
+      <input name="formfields[proj_title]"
+	     value="<%- formfields.proj_title %>"
+	     class="form-control format-me" data-key="proj_title"
+	     placeholder="Project Title (short sentence)" type="text">
+      <input name="formfields[proj_url]" value="<%- formfields.proj_url %>"
+	     class="form-control format-me" data-key="proj_url"
+	     placeholder="Project Page URL" type="text">
+      <textarea name="formfields[proj_why]" rows="8"
+		class="form-control format-me" data-key="proj_why"
+		placeholder="Project Description (details)"
+		type="textarea"><%- formfields.proj_why %></textarea>
+  </div>
+</div>

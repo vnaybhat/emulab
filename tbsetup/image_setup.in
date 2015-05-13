@@ -1,0 +1,180 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2003-2012 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use English;
+use Getopt::Std;
+use Socket;
+    
+#
+# Fetch external image definitions and create local descriptors.
+#
+
+sub usage()
+{
+    print "Usage: $0 [-d] [-v] [-g] eid\n";
+    print("Options:\n");
+    print(" -d      - Turn on debugging\n");
+    print(" -v      - Verify XML descriptions only\n");
+    print(" -g      - Download image after creating descriptors\n");
+ 
+    exit(-1);
+}
+my $optlist  = "dvg";
+my $debug    = 0;
+my $verify   = 0;
+my $getimages= 0;
+
+#
+# Functions
+#
+sub verifyURL($);
+
+#
+# Configure variables
+#
+my $TB       = "@prefix@";
+my $TBOPS    = "@TBOPSEMAIL@";
+my $IMPORTER = "$TB/sbin/image_import";
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Untaint the path
+# 
+$ENV{'PATH'} = "$TB/bin:$TB/sbin:/bin:/usr/bin:/sbin:/usr/sbin";
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Testbed Support libraries
+#
+use lib "@prefix@/lib";
+use libtestbed;
+use libdb;
+use libtblog;
+use Experiment;
+use Image;
+use User;
+
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"v"})) {
+    $verify = 1;
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"g"})) {
+    $getimages = 1;
+}
+if (@ARGV != 1) {
+    usage();
+}
+
+#
+# Verify user and get his DB uid and other info for later.
+#
+my $this_user = User->ThisUser();
+if (! defined($this_user)) {
+    tbdie("You ($UID) do not exist!");
+}
+my $user_uid   = $this_user->uid();
+
+#
+# First, make sure the experiment exists
+#
+my $experiment = Experiment->Lookup($ARGV[0]);
+if (! $experiment) {
+    tbdie("There is no such experiment");
+}
+my $pid = $experiment->pid();
+my $eid = $experiment->eid();
+
+#
+# User must have at least MODIFY permissions to use this script
+#
+if (!$experiment->AccessCheck($this_user, TB_EXPT_MODIFY())) {
+    tbdie("You are not allowed to modify experiment $eid in project $pid");
+}
+
+#
+# Look for any nodes that specify a url for the osname. 
+#
+my $result = $experiment->TableLookUp("virt_nodes", "vname,osname");
+
+while (my ($vname, $osname) = $result->fetchrow()) {
+    my $url;
+    
+    next
+	if (! ($osname =~ /^(ftp|http|https):/));
+
+    # Verify entire URL and taint check.
+    if ($osname =~ /^((http|https|ftp)\:\/\/[-\w\.\/\@\:\~\?\=\&]*)$/) {
+	$url = $1;
+    }
+    else {
+	tbdie("Invalid URL $osname\n");
+    }
+    my $safe_url = User::escapeshellarg($url);
+
+    #
+    # See if we have already created this descriptor. If so, we
+    # do not do anything until later when the experiment is
+    # being swapped in. At this point, we just want to verify
+    # the information and create the descriptor. Later we will
+    # fetch the image file, or refetch if it is stale.
+    #
+    my $image = Image->LookupByURL($url);
+    if (!defined($image)) {
+	my $opts = "";
+	$opts .= " -d"
+	    if ($debug);
+	$opts .= " -v"
+	    if ($verify);
+	system("$IMPORTER $opts -p $pid $safe_url");
+	exit(-1)
+	    if ($?);
+    }
+    next
+	if ($verify);
+
+    $image = Image->LookupByURL($url);
+    if (!defined($image)) {
+	tbdie("Could not look up image object for $url\n");
+    }
+    next
+	if (! $getimages);
+
+    my $opts = "";
+    $opts .= " -d"
+	if ($debug);
+    system("$IMPORTER $opts -g -p $pid $safe_url");
+    exit(-1)
+	if ($?);
+}
+exit(0);
+

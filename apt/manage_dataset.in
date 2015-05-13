@@ -1,0 +1,427 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use English;
+use strict;
+use Getopt::Std;
+use Data::Dumper;
+use POSIX ":sys_wait_h";
+use POSIX qw(setsid close);
+use Date::Parse;
+
+#
+# Back-end script to manage APT profiles.
+#
+sub usage()
+{
+    print STDERR "Usage: manage_dataset [options --] create ...\n";
+    print STDERR "Usage: manage_dataset [options --] delete ...\n";
+    print STDERR "Usage: manage_dataset [options --] refresh ...\n";
+    exit(-1);
+}
+my $optlist     = "dt:";
+my $debug       = 0;
+my $webtask_id;
+my $webtask;
+
+#
+# Configure variables
+#
+my $TB		= "@prefix@";
+my $TBOPS       = "@TBOPSEMAIL@";
+
+#
+# Untaint the path
+#
+$ENV{'PATH'} = "$TB/bin:$TB/sbin:/bin:/usr/bin:/usr/bin:/usr/sbin";
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Load the Testbed support stuff.
+#
+use lib "@prefix@/lib";
+use libtestbed;
+use EmulabConstants;
+use emdb;
+use emutil;
+use User;
+use Project;
+use APT_Dataset;
+use WebTask;
+use Blockstore;
+use GeniResponse;
+
+# Protos
+sub fatal($);
+sub DoCreate();
+sub DoDelete();
+sub DoRefresh();
+sub DoRefreshInternal($$);
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (grep {$_ eq "--"} @ARGV &&
+    ! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"t"})) {
+    $webtask_id = $options{"t"};
+}
+if (@ARGV < 1) {
+    usage();
+}
+
+# The web interface (and in the future the xmlrpc interface) sets this.
+my $this_user = User->ImpliedUser();
+if (! defined($this_user)) {
+    $this_user = User->ThisUser();
+    if (!defined($this_user)) {
+	fatal("You ($UID) do not exist!");
+    }
+}
+my $action = shift(@ARGV);
+
+#
+# Create the webtask object if coming from the web interface.
+#
+if (defined($webtask_id)) {
+    $webtask = WebTask->Create(undef, $webtask_id);
+    if (!defined($webtask)) {
+	fatal("Could not create webtask");
+    }
+    # Convenient.
+    $webtask->AutoStore(1);
+}
+
+if ($action eq "create") {
+    exit(DoCreate());
+}
+elsif ($action eq "delete") {
+    exit(DoDelete());
+}
+elsif ($action eq "refresh") {
+    exit(DoRefresh());
+}
+else {
+    usage();
+}
+exit(1);
+
+#
+# 
+#
+sub DoCreate()
+{
+    my $usage = sub {
+	print STDERR "Usage: manage_dataset create ".
+	    "[-t type] [-f fstype] [-e expiration] -s size pid/name\n";
+	exit(-1);
+    };
+    my $aggregate_urn = "urn:publicid:IDN+apt.emulab.net+authority+cm";
+    my $logfile;
+    my $errmsg;
+    my $pid;
+    my $expires;
+    my $size;
+    my $type = "stdataset";
+    my $fstype;
+    
+    my $optlist = "ds:t:e:f:";
+    my %options = ();
+    if (! getopts($optlist, \%options)) {
+	&$usage();
+    }
+    if (defined($options{"d"})) {
+	$debug = 1;
+    }
+    if (defined($options{"t"})) {
+	$type = $options{"t"};
+	&$usage()
+	    if (! ($type eq "stdataset" || $type eq "ltdataset"));
+    }
+    if (defined($options{"f"})) {
+	$fstype = $options{"f"};
+	&$usage()
+	    if ($fstype !~ /^(ext2|ext3|ext4|ufs|ufs2)$/);
+    }
+    if (defined($options{"s"})) {
+	if ($options{"s"} =~ /^(\d+)$/) {
+	    $size = $1;
+	}
+	elsif ($options{"s"} =~ /^(\d+)(\w+)$/) {
+	    $size = Blockstore::ConvertToMebi($options{"s"});
+	    if ($size < 0) {
+		fatal("Could not parse size.");
+	    }
+	}
+	else {
+	    &$usage();
+	}
+    }
+    if (defined($options{"e"})) {
+	$expires = str2time($options{"e"});
+	if (!defined($expires)) {
+	    fatal("Could not parse expiration date.");
+	}
+	$expires = $options{"e"};
+    }
+    &$usage()
+	if (@ARGV != 1 || !defined($size) ||
+	    ($type eq "stdataset" && !defined($expires)));
+    my $name = shift(@ARGV);
+
+    if ($name =~ /^([-\w]+)\/([-\w]+)$/) {
+	$pid  = $1;
+	$name = $2;
+    }
+    else {
+	fatal("Dataset name $name not in the form <pid>/<name>.");
+    }
+    my $project = Project->Lookup($pid);
+    if (!defined($project)) {
+	fatal("No such project");
+    }
+    if (!$project->AccessCheck($this_user, TB_PROJECT_CREATELEASE())) {
+	fatal("Not enough permission in project");
+    }
+    &$usage()
+	if ($type eq "stdataset" && !defined($expires));
+
+    if (APT_Dataset->Lookup("$pid/$name")) {
+	fatal("Dataset already exists!");
+    }
+
+    my $blob = {
+	"dataset_id"     => $name,
+	"pid"            => $project->pid(),
+	"pid_idx"        => $project->pid_idx,
+	"creator_uid"    => $this_user->uid(),
+	"creator_idx"    => $this_user->uid_idx(),
+	"aggregate_urn"  => $aggregate_urn,
+	"type"           => $type,
+	"size"           => $size,
+    };
+    $blob->{"fstype"} = $fstype
+	if (defined($fstype));
+    $blob->{"expires"} = TBDateStringLocal($expires)
+	if (defined($expires));
+
+    my $dataset = APT_Dataset->Create($blob);
+    if (!defined($dataset)) {
+	fatal("Internal error creating dataset object");
+    }
+    # new dataset is returned locked. 
+    
+    #
+    # Ask the aggregate to create the dataset. 
+    #
+    my $response = $dataset->CreateDataset();
+    if ($response->code() != GENIRESPONSE_SUCCESS) {
+	$errmsg = "CreateDataset failed: ". $response->output() . "\n";
+	goto failed;
+    }
+    $blob = $response->value();
+    $dataset->Update({"remote_uuid" => $blob->{"uuid"}});
+    #
+    # Okay, this is silly; there is no distinct state for resource allocation.
+    # It is unapproved and locked. The other side tells us its locked in the
+    # blob (busy), so look for this and set the state to busy. Then we poll
+    # waiting for the lease to go nonbusy and approved. Ick.
+    #
+    if ($blob->{"busy"}) {
+	$dataset->Update({"state" => "busy"});
+    }
+    else {
+	$dataset->Update({"state" => $blob->{"state"}});
+	$dataset->Unlock();
+	return 0;
+    }
+    #
+    # If busy, then allocation is in progress. We leave it locked and
+    # poll in the background for a while, hoping for it to eventually
+    # stop being busy. Eventually might have to replace this, since
+    # polling got any non-small length of time will lead to trouble.
+    #
+    if (! $debug) {
+        $logfile = TBMakeLogname("createdataset");
+
+	if (my $childpid = TBBackGround($logfile)) {
+	    # Parent exits normally, web interface watches.
+	    exit(0);
+	}
+	# Let parent exit;
+	sleep(2);
+    }
+    $webtask->SetProcessID($PID)
+	if (defined($webtask));
+
+    my $seconds  = 1200;
+    my $interval = 30;
+    
+    while ($seconds > 0) {
+	sleep($interval);
+	$seconds -= $interval;
+	if (DoRefreshInternal($dataset, \$errmsg)) {
+	    print STDERR $errmsg;
+	    next;
+	}
+	if ($dataset->state() eq "valid") {
+	    $project->SendEmail($this_user->email(),
+			"Your dataset is now ready to use",
+			"Dataset '$name' is now allocated and ready to use.\n",
+			$project->OpsEmailAddress());
+	    last;
+	}
+    }
+    $dataset->Unlock();
+    unlink($logfile)
+	if (defined($logfile));
+    return 0;
+
+  failed:
+    $dataset->Delete()
+	if (defined($dataset));
+    unlink($logfile)
+	if (defined($logfile));
+    # This will set the webtask, see below.
+    fatal($errmsg);
+}
+
+#
+# Delete
+#
+sub DoDelete()
+{
+    my $errmsg;
+    
+    if (@ARGV != 1) {
+	fatal("usage: $0 delete pid/name");
+    }
+    my $token   = shift(@ARGV);
+    my $dataset = APT_Dataset->Lookup($token);
+    if (!defined($dataset)) {
+	fatal("No such dataset");
+    }
+    if ($dataset->Lock()) {
+	fatal("dataset is busy, cannot lock it");
+    }
+    my $response = $dataset->DeleteDataset();
+    if ($response->code() != GENIRESPONSE_SUCCESS &&
+	$response->code() != GENIRESPONSE_SEARCHFAILED) {
+	$errmsg = "DeleteDataset failed: ". $response->output() . "\n";
+	goto failed;
+    }
+    $dataset->Delete();
+    return 0;
+
+  failed:
+    $dataset->Unlock();
+    # This will set the webtask, see below.
+    fatal($errmsg);
+}
+
+#
+# Refresh
+#
+sub DoRefresh()
+{
+    my $errmsg;
+    
+    if (@ARGV != 1) {
+	fatal("usage: $0 refresh pid/name");
+    }
+    my $token   = shift(@ARGV);
+    my $dataset = APT_Dataset->Lookup($token);
+    if (!defined($dataset)) {
+	fatal("No such dataset");
+    }
+    if ($dataset->Lock()) {
+	fatal("dataset is busy, cannot lock it");
+    }
+    if (DoRefreshInternal($dataset, \$errmsg)) {
+	goto failed;
+    }
+    $dataset->Unlock();
+    return 0;
+
+  failed:
+    $dataset->Unlock();
+    # This will set the webtask, see below.
+    fatal($errmsg);
+}
+
+sub DoRefreshInternal($$)
+{
+    my ($dataset, $pmesg) = @_;
+    
+    my $response = $dataset->DescribeDataset();
+    if ($response->code() != GENIRESPONSE_SUCCESS) {
+	$$pmesg = "DescribeDataset failed: ". $response->output() . "\n";
+	return -1;
+    }
+    my $blob = $response->value();
+    $dataset->Update({"last_used" => TBDateStringLocal($blob->{"lastused"}),
+		      "expires"   => TBDateStringLocal($blob->{"expires"})});
+
+    if ($blob->{"busy"}) {
+	$dataset->Update({"state" => "busy"});
+    }
+    else {
+	$dataset->Update({"state" => $blob->{"state"}});
+    }
+    return 0;
+}
+
+sub fatal($)
+{
+    my ($mesg) = @_;
+
+    if (defined($webtask)) {
+	$webtask->output($mesg);
+	$webtask->Exited(-1);
+    }
+    print STDERR "*** $0:\n".
+	         "    $mesg\n";
+    # Exit with negative status so web interface treats it as system error.
+    exit(-1);
+}
+
+sub escapeshellarg($)
+{
+    my ($str) = @_;
+
+    $str =~ s/[^[:alnum:]]/\\$&/g;
+    return $str;
+}
+

@@ -1,0 +1,37 @@
+<input name="formfields[uid]" value="<%- formfields.uid %>"
+       class="form-control" data-key="uid"
+       placeholder="Username" autofocus type="text">
+<input name="formfields[fullname]" value="<%- formfields.fullname %>"
+       class="form-control" data-key="fullname"
+       placeholder="Full Name" type="text">
+<input name="formfields[email]" value="<%- formfields.email %>"
+       class="form-control" data-key="email"
+       placeholder="Email" type="text">
+<input name="formfields[affiliation]" value="<%- formfields.affiliation %>"
+       class="form-control" data-key="affiliation"
+       placeholder="Institutional Affiliation" type="text">
+<select id="signup_countries" name="formfields[country]"
+        class="form-control bfh-countries"
+        data-country="<%- formfields.country %>"
+        data-blank="false" data-ask="true" data-key="country">
+</select>
+<select  id="signup_states" name="formfields[state]"
+         class="form-control bfh-states"
+	 data-state="<%- formfields.state %>"
+	 data-country="signup_countries" data-ask="true"
+         placeholder="State" data-blank="false" data-key="state">
+</select>
+<input name="formfields[city]" value="<%- formfields.city %>"
+       class="form-control" data-key="city"
+       placeholder="City" type="text">
+<div data-key="keyfile">
+  <span class="help-block">SSH Public Key file</span>
+  <input type="file" name="keyfile"
+         placeholder="SSH Public Key File">
+</div>
+<input name="formfields[password1]" value="<%- formfields.password1 %>"
+       class="form-control" data-key="password1"
+       placeholder="Password" type="password">
+<input name="formfields[password2]" value="<%- formfields.password2 %>"
+       class="form-control" data-key="password2"
+       placeholder="Confirm Password" type="password">

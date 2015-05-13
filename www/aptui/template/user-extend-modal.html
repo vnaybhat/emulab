@@ -1,0 +1,88 @@
+<!-- This is the extend modal -->
+<div id='extend_modal' class='modal fade'>
+  <div class='modal-dialog'>
+    <div class='modal-content'>
+      <div class='modal-body'>
+        <button type='button' class='close' data-dismiss='modal'
+                aria-hidden='true'>&times;</button>
+        <div class='clearfix'></div>
+	<div class='row'>
+	  <div class='col-sm-12'>
+            <form id='extend_request_form' role='form'>
+	      <center>
+		<h4>Please select your extension duration:
+		  <span id='extend_value'>1 day</span></h4>
+	      </center>
+	      <div id='extend_slider'></div>
+	      <br>
+	      <div class='row'>
+		<div class='col-lg-10 col-lg-offset-1
+                            col-md-10 col-md-offset-1
+                            col-sm-12 col-sm-offset-0
+                            col-xs-12 col-xs-offset-0'>
+		  <div id='label0_request' data-minchars='120'>
+		    <p>
+		      Please provide a short explanation (a few sentences)
+		      telling us why need more time.  Then click on the
+		      request button.
+		    </p>
+		  </div>
+		  <div id='label1_request' class='hidden' data-minchars='240'>
+		    <p>
+		      Please provide a short explanation (a few sentences)
+		      telling us why need more time.  Then click on the
+		      request button. You will receive email when your
+  		      extension is granted, if you do not hear back in a
+  		      day or two, please contact us.
+		    </p>
+		  </div>
+		  <div id='label2_request' class='hidden' data-minchars='380'>
+		    <p>
+		      Extensions this large require a more detailed
+		      explanation.  Please provide a paragraph, and then
+		      click on the request button. You will receive email
+  		      when your extension is granted, if you do not hear
+  		      back in a day or two, please contact us.
+		    </p>
+		  </div>
+		  <div id='label3_request' class='hidden' data-minchars='512'>
+		    <p>
+		      Please select a date and be sure to tell us in
+		      detail why you need such a long extension.  Be sure
+  		      include a phone number where we can contact you to
+  		      discuss your extension. Then click on the request
+  		      button. You will receive email when your extension is
+  		      granted, if you do not hear back in a day or two,
+  		      please contact us.
+		    </p>
+		    <center><input type='text' id='datepicker'
+				   name='datepicker'
+				   size=11
+				   placeholder='MM/DD/YYYY'>
+		    </center>
+		    <br>
+		  </div>
+		  <div id='why_extend_div'>
+		    <textarea id='why_extend'
+			      class='form-control align-center-inline'
+			      rows=5></textarea>
+		    <span style="font:normal 11px sans-serif;color:#B00400;">
+		      <span id='extend_counter_msg'>&nbsp</span>
+		    </span>
+		  </div>
+		</div>
+	      </div>
+	      <br>
+	      <button class='btn btn-primary btn-sm align-center' disabled
+		      id='request-extension'
+		      type='submit' name='request'>Request Extension</button>
+	      
+            </form>
+          </div>
+	</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+

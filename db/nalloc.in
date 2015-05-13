@@ -1,0 +1,317 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2000-2013 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use strict;
+use English;
+use Getopt::Std;
+
+#
+# nalloc - allocate nodes to an experiment. Takes a pid, and eid, and
+# a list of nodes. Only nodes that are free can be allocated.
+#
+# Exit status is important! Exit with -1 if an error, else the number
+# of nodes that could not be allocated. Otherwise zero.
+#
+sub usage()
+{
+    print("Usage: nalloc [-d] [-p] <pid> <eid> <node> <node> <...>\n".
+	  "		-p enables partial allocation mode\n".
+	  "		-d enables debugging output\n");
+    exit(-1);
+}
+my $optlist = "dp";
+my $debug   = 0;
+my $partial = 0;
+
+#
+# Configure variables
+#
+my $TB          = "@prefix@";
+my $consetup    = "$TB/libexec/console_setup";
+my $exportsetup = "$TB/sbin/exports_setup";
+my $makeconf    = "$TB/sbin/dhcpd_makeconf";
+
+#
+# Testbed Support libraries
+#
+use lib '@prefix@/lib';
+use libdb;
+use libtestbed;
+use Experiment;
+use Project;
+use User;
+use Node;
+use EmulabFeatures;
+
+#
+# Turn off line buffering on output
+#
+$| = 1; 
+
+# For perf analysis.
+#TBDebugTimeStampsOn();
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"p"})) {
+    $partial = 1;
+}
+if (@ARGV < 2) {
+    usage();
+}
+my $pid		= shift;
+my $eid		= shift;
+my @node_names	= @ARGV;
+
+#
+# Locals
+# 
+my $error	  = 0;
+my $noalloc	  = 0;
+my @oldnodes	  = ();
+my @nodes	  = ();
+my $need_consetup = 0;
+my @need_history  = ();
+my @need_clearbl  = ();
+
+TBDebugTimeStamp("nalloc started");
+
+#
+# Experiment must exist.
+# 
+my $experiment = Experiment->Lookup($pid, $eid);
+if (! $experiment) {
+    die("*** $0:\n".
+	"    No such experiment $pid/$eid in the Emulab Database.\n");
+}
+my $exptidx = $experiment->idx();
+my $project = $experiment->GetProject();
+if (!defined($project)) {
+    die("*** $0:\n".
+	"    Could not get project for experiment $experiment!\n");
+}
+    
+#
+# User must have permission to modify the experiment.
+#
+my $this_user = User->ThisUser();
+if (! defined($this_user)) {
+    die("*** $0:\n".
+	"    You ($UID) do not exist in the Emulab DB!\n");
+}
+if (!$experiment->AccessCheck($this_user, TB_EXPT_MODIFY)) {
+    die("*** $0:\n".
+	"    You do not have permission to allocate nodes in $pid/$eid\n");
+}
+
+#
+# Before locking any tables, do a quick check to make sure the project
+# is allowed to allocate the nodes, by type/class, plus other checks.
+#
+foreach my $n (@node_names) {
+    my $node = Node->Lookup($n);
+    if (!defined($node)) {
+	die("*** $0:\n".
+	    "    No such node $n!\n");
+    }
+    # Project allowed to allocate this node type/class?
+    if (!$this_user->IsAdmin() && !$node->AllocCheck($project)) {
+	die("*** $0:\n".
+	    "    You are not allowed to allocate $n to project $pid!\n");
+    }
+
+    # XXX
+    # If the node has a tipline, then indicate that we want to call
+    # console_setup. We want to avoid calling console_setup if all we
+    # got is a zillion virtual nodes on the command line; wasted work.
+    #
+    my $tipserver;
+    if ($node->TipServer(\$tipserver) == 0 && defined($tipserver)) {
+	$need_consetup++;
+    }
+}
+TBDebugTimeStamp("nalloc checked all node permissions");
+
+# Must lock this table!
+DBQueryFatal("lock tables reserved write");
+TBDebugTimeStamp("nalloc locked tables");
+
+# Make a list of nodes to reserve.
+foreach my $n (@node_names) {
+    my $node = Node->Lookup($n);
+    if (!defined($node)) {
+	die("*** $0:\n".
+	    "    No such node $n!\n");
+    }
+    # Force reload after table lock.
+    $node->FlushReserved();
+    
+    my $reserved_experiment = $node->ReservationID();
+    if ($reserved_experiment) {
+	# Someone has already reserved this node
+	if ($reserved_experiment == $experiment->idx()) {
+	    print "$node already reserved to $experiment.\n";
+	    # Do not increment error code since that throws off caller.
+	    next;
+	}
+	my $oldreserved_experiment = $node->OldReservationID();
+	if ($oldreserved_experiment &&
+	    $oldreserved_experiment eq $experiment->idx()) {
+	    print "$node already reserved in holding reservation.\n";
+	    push(@oldnodes, $node);
+	    next;
+	}
+	else {
+	    print "Someone else has already reserved node $node.\n";
+	    $noalloc++;
+	    next;
+	}
+    }
+    else {
+	# Freshly allocated nodes need a history entry.
+	push(@need_history, $node);
+        # ... and need to have their bootlogs purged.
+        push(@need_clearbl, $node);
+    }
+
+    #
+    # Add info the list of nodes to reserve; done in a single query below.
+    # 
+    push(@nodes, $node);
+}
+TBDebugTimeStamp("nalloc checked all nodes");
+
+if ($debug) {
+    print "List Ready: @nodes\nError=$error\n";
+}
+
+# Now make the reservations in the DB.
+if ((!$noalloc || $partial) && (@nodes || @oldnodes)) {
+    print "Reserving nodes...\n"
+	if ($debug);
+
+    # Generate strings for a single query. Could use perl map().
+    if (@nodes) {
+	my @values = ();
+	foreach my $node (@nodes) {
+	    my $node_id = $node->node_id();
+	    
+	    push(@values,
+		 "('$node_id',$exptidx,'$pid','$eid','$node_id','','')");
+	}
+	if (! DBQueryWarn("replace into reserved ".
+			  " (node_id,exptidx,pid,eid,vname,old_pid,old_eid) ".
+			  "values ". join(",",@values))) {
+	    $error++;
+	}
+    }
+    
+    # Do this instead of creating new entries so as not to lose any
+    # other info in the reserved table entries. I think this might be;
+    # wrong; might need to rethink this.
+    foreach my $node (@oldnodes) {
+	my $node_id = $node->node_id();
+	
+	if (!DBQueryWarn("update reserved " .
+			 "set exptidx=$exptidx,pid='$pid',eid='$eid', ".
+			 "    old_exptidx=0, old_pid='', old_eid='' ".
+			 "where node_id='$node_id'")) {
+	    $error++;
+	}
+    }
+}
+TBDebugTimeStamp("nalloc allocated all nodes");
+
+# Unlock tables.
+DBQueryFatal("unlock tables");
+
+# Okay, now safe to do this
+
+# Update node_activity table; no need to do this with tables locked.
+if (!$error && (!$noalloc || $partial) && @nodes) {
+    print "Resetting node activity\n"
+	if ($debug);
+
+    # It isn't an error if this fails...
+    DBQueryWarn("update node_activity set ".
+		"  last_ext_act=now(), last_report=now() ".
+		"where ".
+		join(" or ",
+		     map("node_id='" . $_->node_id() . "'", @nodes)));
+
+    foreach my $node (@nodes) {
+	$node->NewRootPasswd();
+    }
+    foreach my $node (@need_history) {
+	$node->SetNodeHistory(TB_NODEHISTORY_OP_ALLOC,
+			      $this_user, $experiment);
+    }
+
+    # Clear boot logs - maybe this should be done before alloc?
+    #  - only a small window of opportunity at any rate.
+    # This is sort of wasteful as it should be the same set of nodes
+    # as in the node history loop above, but that could change at some point.
+    foreach my $node (@need_clearbl) {
+	$node->ClearBootLog();
+    }
+}
+TBDebugTimeStamp("updated node_activity, history, and bootlogs");
+
+# Now setup consoles if needed.
+if ($need_consetup && !$error && @nodes) {
+    my @nodeids = map($_->node_id(), @nodes);
+    
+    system("$consetup @nodeids") == 0 or
+	print STDERR "WARNING: $consetup @nodes failed!\n";
+    TBDebugTimeStamp("nalloc finished console setup");
+}
+
+$EmulabFeatures::verbose = 0;
+if (EmulabFeatures->FeatureEnabled("ExternalNodeManagement",
+				   undef, undef,
+				   $experiment)) {
+    print "ExternalNodeManagement feature is set: Disabling Emulab ".
+	  "management of nodes in $experiment ...\n";
+    # Shut off dhcp response for nodes in this experiment.
+    if (system("$makeconf -i -r")) {
+	print STDERR "WARNING: Failed to reconfigure dhcp!\n";
+    }
+}
+
+#
+# Exit with -1 if an error, else the number of nodes that could not
+# be allocated.
+#
+my $exitval = ($error ? -1 : $noalloc);
+if ($debug) { print "Returning with value $exitval\n"; }
+exit($exitval);

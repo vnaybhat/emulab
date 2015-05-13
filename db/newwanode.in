@@ -1,0 +1,371 @@
+#!/usr/bin/perl -wT
+#
+# Copyright (c) 2000-2008 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use English;
+use Getopt::Std;
+
+#
+# Add a new node to the DB. Strictly for widearea nodes right now.
+# 
+sub usage()
+{
+    print "Usage: ".
+	"newwanode [-w] [-n nickname] -t <nodetype> -i <ip address>\n";
+    exit(1);
+}
+sub fatal($);
+my  $optlist = "wt:i:a:n:";
+
+#
+# Configure variables
+#
+my $TB		= "@prefix@";
+my $TBOPS       = "@TBOPSEMAIL@";
+my $TBLOGS      = "@TBLOGSEMAIL@";
+my $named_setup = "$TB/sbin/named_setup";
+
+# un-taint path
+$ENV{'PATH'} = '/bin:/usr/bin:/usr/local/bin:/usr/site/bin';
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Turn off line buffering on output
+#
+$| = 1; 
+
+# Load the Testbed support stuff.
+use lib "@prefix@/lib";
+use libdb;
+use libtestbed;
+use NodeType;
+
+#
+# This is run from the web page, but tbadmins can run it from the command
+# line. 
+#
+if ($UID != getpwnam("nobody") && !TBAdmin($UID)) {
+    die("*** $0:\n".
+	"    You do not have permission to run this script!\n");
+}
+
+my $nodetype;
+my $nodeip;
+my $fromweb = 0;
+my $reuse   = 0;
+my $nickname;
+my $nodename;
+my $nodevtype;
+my $nodeauxtype;
+my $nodevname;
+my $pid;
+my $eid;
+my $nextid;
+my $nextpri;
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+%options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"w"})) {
+    $fromweb = 1;
+}
+if (defined($options{"i"})) {
+    $nodeip = $options{"i"};
+}
+if (defined($options{"t"})) {
+    $nodetype = $options{"t"};
+}
+if (defined($options{"a"})) {
+    $nodeauxtype = $options{"a"};
+}
+if (defined($options{"n"})) {
+    $nickname = $options{"n"};
+}
+if (!defined($nodeip) || !defined($nodetype)) {
+    usage();
+}
+
+#
+# Taint check.
+#
+if ($nodetype =~ /^([\w]+)$/) {
+    $nodetype = $1;
+}
+else {
+    die("*** Bad data in $nodetype\n");
+}
+if ($nodeip =~ /^([\d\.]+)$/) {
+    $nodeip = $1;
+}
+else {
+    die("*** Bad data in $nodeip\n");
+}
+if (defined($nodeauxtype)) {
+    if ($nodeauxtype =~ /^([\w]+)$/) {
+	$nodeauxtype = $1;
+    }
+    else {
+	die("*** Bad data in $nodeauxtype\n");
+    }
+}
+if (defined($nickname)) {
+    if ($nickname =~ /^([-\w]+)$/) {
+	$nickname = $1;
+    }
+    else {
+	die("*** Bad data in $nickname\n");
+    }
+}
+
+#
+# Must be a valid type.
+#
+my $typeinfo = NodeType->Lookup($nodetype);
+if (!defined($typeinfo)) {
+    fatal("*** $0:\n".
+	  "    No such nodetype $nodetype is defined in the DB!\n");
+}
+my ($defosid,$control_iface);
+
+if ($typeinfo->default_osid(\$defosid) || !$defosid) {
+    fatal("*** $0:\n".
+	  "    No default OSID for $nodetype is defined in the DB!\n");
+}
+if ($typeinfo->control_interface(\$control_iface) || !$control_iface) {
+    fatal("*** $0:\n".
+	  "    No control interface for $nodetype is defined in the DB!\n");
+}
+
+#
+# For now, just pcwa/pcron is allowed until we have more DB state that says
+# how to build the virtual nodes, although that is temporary as well.
+#
+if ($nodetype ne "pcwa" && $nodetype ne "pcron") {
+    fatal("Can only handle pcwa/pcron nodetype right now!");
+}
+
+#
+# Create the virtual type name. Again, this is bogus.
+#
+if ($nodetype eq "pcwa") {
+    $nodevtype = "pcvwa";
+    $nodeauxtype = "pcvwainet"
+	if (!defined($nodeauxtype));
+}    
+else {
+    $nodevtype = "pcvron";
+    $nodeauxtype = "pcvroninet"
+	if (!defined($nodeauxtype));
+}
+
+#
+# Again, this is bogus.
+#
+if ($nodetype eq "pcwa") {
+    $pid = "emulab-ops";
+    $eid = "widearea-nodes";
+}    
+else {
+    $pid = "ron";
+    $eid = "all";
+}
+
+my $exptidx;
+if (!TBExptIDX($pid, $eid, \$exptidx)) {
+    fatal("*** $0:\n".
+	  "    No such experiment $pid/$eid!\n");
+}
+
+#
+# Lets see if a known IP. If so we want to reuse the existing record.
+#
+if (TBIPtoNodeID($nodeip, \$nodename)) {
+    #
+    # We need the existing priority for creating the vnodes below.
+    #
+    $query_result =
+	DBQueryFatal("select priority from nodes where node_id='$nodename'");
+
+    my %row  = $query_result->fetchhash();
+    $nextpri = $row{'priority'};
+    $reuse   = 1;
+}
+else {
+    #
+    # We need the next id and priority.
+    # 
+    DBQueryFatal("lock tables nextfreenode write");
+
+    $query_result =
+	DBQueryFatal("select nextid,nextpri from nextfreenode ".
+		     "where nodetype='$nodetype'");
+
+    if (!$query_result->numrows) {
+	fatal("nodetype $nodetype is not in the nextfreenode table!");
+    }
+    my %row  = $query_result->fetchhash();
+    $nextid  = $row{'nextid'};
+    $nextpri = $row{'nextpri'};
+
+    DBQueryFatal("update nextfreenode ".
+		 "set nextid=nextid+1,nextpri=nextpri+1 ".
+		 "where nodetype='$nodetype'");
+
+    DBQueryFatal("unlock tables");
+
+    #
+    # Form a new node name! Bogus. need more DB state.
+    #
+    if ($nodetype =~ /^pc(\w+)$/) {
+	$nodename = "${1}${nextid}";
+    }
+    else {
+	fatal("Could not determine a name from type for $nodetype!");
+    }
+}
+
+if (!defined($nickname)) {
+    $nickname = $nodename;
+}
+
+#
+# Enter the records
+#
+if ($reuse) {
+    print "Reusing exiting record for $nodename. IP=$nodeip\n";
+}
+else {
+    print "Creating widearea node $nodename ...\n";
+    DBQueryFatal("insert into nodes ".
+		 "(node_id, type, phys_nodeid, role, priority, ".
+		 " op_mode, def_boot_osid) ".
+		 "values ('$nodename', '$nodetype', '$nodename', ".
+		 "        'testnode', $nextpri, 'NORMAL', ".
+		 "        '$defosid') ");
+
+    DBQueryFatal("insert into node_hostkeys (node_id) ".
+		 "values ('$nodename')");
+
+    DBQueryFatal("insert into node_auxtypes ".
+		 "(node_id, type, count) ".
+		 "values ('$nodename', '$nodeauxtype', 20)");
+
+    DBQueryFatal("insert into node_auxtypes ".
+		 "(node_id, type, count) ".
+		 "values ('$nodename', '$nodevtype', 20)");
+
+    DBQueryFatal("replace into node_status ".
+		 "(node_id, status, status_timestamp) ".
+		 "values ('$nodename', 'down', now()) ");
+
+    # Note that card/port are arbitrary for remote nodes since they are
+    # not connected to local switches! 
+    my $ifacerole = TBDB_IFACEROLE_CONTROL();
+        
+    DBQueryFatal("insert into interfaces ".
+		 "(node_id, card, port, IP, interface_type, iface, role) ".
+		 "values ('$nodename', 0, 1, '$nodeip', ".
+		 "        'fxp', '$control_iface', '$ifacerole')");
+
+    DBQueryFatal("insert into interface_state ".
+		 "(node_id, card, port, iface) ".
+		 "values ('$nodename', 0, 1, 'fxp')");
+
+    DBQueryFatal("insert into reserved ".
+		 "(node_id, exptidx, pid, eid, rsrv_time, vname) ".
+		 "values ('$nodename', $exptidx, ".
+		 "        '$pid', '$eid', now(), '$nickname')");
+}
+
+#
+# Always create these. I'll kill off the old ones as needed for now.
+# 
+for ($i = 1; $i < 9; $i++) {
+    my $priority  = ($nextpri * 100) + $i;
+    $nodevname = "v${nodename}-${i}";
+
+    print "Creating widearea virtual node $nodevname ...\n";
+    DBQueryFatal("insert into nodes ".
+		 "(node_id, type, phys_nodeid, role, priority, ".
+		 " op_mode, def_boot_osid, update_accounts) ".
+		 "values ('$nodevname', '$nodevtype', '$nodename', ".
+		 "        'virtnode', $priority, 'NORMAL', ".
+		 "        '$defosid', 1) ");
+
+    DBQueryFatal("insert into node_hostkeys (node_id) ".
+		 "values ('$nodevname')");
+}
+
+#
+# Lets log it.
+#
+my $subject;
+my $message;
+if ($reuse) {
+    $subject = "Existing WA node has reinstalled";
+    $message = "Existing WA node has been reinstalled";
+}
+else {
+    $subject = "New WA node created";
+    $message = "New Wide Area node has been created";
+}
+
+SENDMAIL($TBLOGS, $subject,
+	 "$message\n".
+	 "\n".
+	 "Type:      $nodetype\n".
+	 "Name:      $nodename\n".
+	 "IP:        $nodeip\n".
+	 "Vtype:     $nodevtype\n".
+	 "Auxtype:   $nodeauxtype\n".
+	 "Vname:     $nodevname (actually the last vnode)\n".
+	 "Nickname:  $nickname\n",
+	 $TBOPS);
+
+#
+# update the named maps. Do it in the background since we do not
+# want to hold up the caller.
+#
+print "Forcing a named map update ...\n";
+my $logname = TBMakeLogname("newwanode");
+if (TBBackGround($logname)) {
+    #
+    # Parent exits normally
+    #
+    exit(0);
+}
+system("$named_setup");
+unlink($logname);
+exit(0);
+
+sub fatal($) {
+    my ($msg) = @_;
+
+    print STDERR "$msg\n";
+    SENDMAIL($TBOPS, "Failure creating new WA node", $msg, $TBOPS);
+    exit(1);
+}

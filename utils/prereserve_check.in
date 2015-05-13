@@ -1,0 +1,150 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2003-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use strict;
+use English;
+use Getopt::Std;
+
+#
+# Look for pending pre-reserves that need to be activated.
+#
+sub usage()
+{
+    print STDERR "Usage: prereserve_check [-d] [-n]\n";
+    exit(-1);
+}
+my $optlist  = "dn";
+my $debug    = 0;
+my $impotent = 0;
+
+# Protos
+sub fatal($);
+
+#
+# Configure variables
+#
+my $TB		 = "@prefix@";
+my $PRERESERVE   = "$TB/sbin/prereserve";
+my $TBOPS        = "@TBOPSEMAIL@";
+
+#
+# Testbed Support libraries
+#
+use lib "@prefix@/lib";
+use emdb;
+use libtestbed;
+use emutil;
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Untaint the path
+# 
+$ENV{'PATH'} = "/bin:/sbin:/usr/bin:";
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"n"})) {
+    $impotent = 1;
+}
+usage()
+    if (@ARGV);
+
+#
+# Look for active pre reserves that need to be terminated.
+#
+my $query_result =
+    DBQueryFatal("select * from node_reservations ".
+		 "where end is not null and ".
+		 "      UNIX_TIMESTAMP(now()) > UNIX_TIMESTAMP(end)");
+
+while (my $row = $query_result->fetchrow_hashref()) {
+    my $pid    = $row->{'pid'};
+
+    if ($debug) {
+	print "Terminating pre-reserve for project $pid\n";
+    }
+    if (!$impotent) {
+	my $output = emutil::ExecQuiet("$PRERESERVE -c -r $pid");
+	if ($?) {
+	    print STDERR "Error terminating pre reservation for $pid!\n";
+
+	    SENDMAIL($TBOPS, "Error Terminating pre reservation for $pid",
+		     "The pre reservation request for project $pid, ".
+		     "could not be terminated!\n\n" . $output . "\n", $TBOPS);
+	}
+	else {
+	    SENDMAIL($TBOPS, "Pre Reservation for $pid has been terminated",
+		     "The pre reservation request for project $pid, ".
+		     "has been terminated\n", $TBOPS);
+	}
+    }
+}
+
+#
+# Look for inactive pre reserves that need to be activated.
+#
+$query_result =
+    DBQueryFatal("select * from node_reservations ".
+		 "where active=0 and start is not null and ".
+		 "       UNIX_TIMESTAMP(now()) >= UNIX_TIMESTAMP(start) ".
+		 "order by priority desc, created asc");
+
+while (my $row = $query_result->fetchrow_hashref()) {
+    my $pid    = $row->{'pid'};
+
+    if ($debug) {
+	print "Activating pre-reserve for project $pid\n";
+    }
+    if (!$impotent) {
+	my $output = emutil::ExecQuiet("$PRERESERVE -a $pid");
+	if ($?) {
+	    print STDERR "Error activating pre reservation for $pid!\n";
+	    
+	    SENDMAIL($TBOPS, "Error activating pre reservation for $pid",
+		     "The pre reservation request for project $pid, ".
+		     "could not be activated!\n\n" . $output . "\n", $TBOPS);
+	}
+    }
+}
+
+sub fatal($)
+{
+    my ($mesg) = $_[0];
+
+    die("*** $0:\n".
+	"    $mesg\n");
+}
+

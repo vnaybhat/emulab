@@ -1,0 +1,170 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2008-2013 University of Utah and the Flux Group.
+# 
+# {{{GENIPUBLIC-LICENSE
+# 
+# GENI Public License
+# 
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and/or hardware specification (the "Work") to
+# deal in the Work without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Work, and to permit persons to whom the Work
+# is furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Work.
+# 
+# THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE WORK OR THE USE OR OTHER DEALINGS
+# IN THE WORK.
+# 
+# }}}
+#
+use strict;
+use English;
+use Frontier::Responder;
+use Frontier::RPC2;
+
+# Do this early so that we talk to the right DB.
+use vars qw($GENI_DBNAME $GENI_METHODS $EMULAB_PEMFILE
+	    $GENI_RESPONSE_CONVERTER $GENI_VERSION);
+BEGIN { $GENI_DBNAME = "geni-cm"; }
+
+# Configure variables
+my $ETCDIR         = "@prefix@/etc";
+$EMULAB_PEMFILE    = "$ETCDIR/genicm.pem";
+
+# Testbed libraries.
+use lib '@prefix@/lib';
+use GeniAM;
+use GeniResponse;
+
+if (!defined($GENI_VERSION)) {
+    $GENI_VERSION = "2.0";
+}
+
+GeniAM::SetGeniVersion($GENI_VERSION);
+
+if ($GENI_VERSION eq "1.0" || $GENI_VERSION eq "2.0") {
+    $GENI_METHODS = {
+        "GetVersion"    => \&GeniAM::GetVersion,
+        "ListResources" => \&GeniAM::ListResources,
+        "CreateSliver"  => \&GeniAM::CreateSliver,
+        "DeleteSliver"  => \&GeniAM::DeleteSliver,
+        "SliverStatus"  => \&GeniAM::SliverStatus,
+        "RenewSliver"   => \&GeniAM::RenewSliver,
+        "Shutdown"      => \&GeniAM::Shutdown,
+        "CreateImage"   => \&GeniAM::CreateImage,
+        "DeleteImage"   => \&GeniAM::DeleteImage,
+        "ListImages"    => \&GeniAM::ListImages,
+    };
+} elsif ($GENI_VERSION eq "3.0") {
+    $GENI_METHODS = {
+        "GetVersion"    => \&GeniAM::GetVersion,
+        "ListResources" => \&GeniAM::ListResources,
+	"Describe"      => \&GeniAM::Describe,
+	"Allocate"      => \&GeniAM::Allocate,
+	"Renew"         => \&GeniAM::Renew,
+	"Provision"     => \&GeniAM::Provision,
+	"Status"        => \&GeniAM::Status,
+	"PerformOperationalAction" => \&GeniAM::PerformOperationalAction,
+	"Delete"        => \&GeniAM::Delete,
+	"Shutdown"      => \&GeniAM::Shutdown,
+	"Update"        => \&GeniAM::Update,
+        "Cancel"        => \&GeniAM::Cancel,
+        "CreateImage"   => \&GeniAM::CreateImage,
+        "DeleteImage"   => \&GeniAM::DeleteImage,
+        "ListImages"    => \&GeniAM::ListImages,
+    };
+}
+
+#----------------------------------------------------------------------
+# Morph the ProtoGENI response (a hash with three keys; a
+# GeniResponse) into a GENI AMv1 response (a single value or a fault if
+# there is an error).
+#
+# $geni_response is an XML RPC response, which is a three element hash. The
+# value element is the GeniResponse hash.
+#----------------------------------------------------------------------
+sub ConvertResponseV1($)
+{
+    my ($geni_response) = @_;
+
+    my $decoder = Frontier::RPC2->new();
+    my $response;
+    
+    if (GeniResponse::IsError($geni_response)) {
+	# An error result gets mapped to an XML RPC fault
+	$response =
+	    $decoder->encode_fault(GeniResponse::code($geni_response),
+				   GeniResponse::output($geni_response));
+    } else {
+	# A successful result means return the value
+	$response =
+	    $decoder->encode_response(GeniResponse::value($geni_response));
+    }
+    return $response;
+}
+
+#----------------------------------------------------------------------
+# Morph the ProtoGENI response (a hash with three keys; a
+# GeniResponse) into a GENI AMv2 response (same value and output, but
+# more complex code format).
+#
+# $geni_response is an XML RPC response, which is a three element hash. The
+# value element is the GeniResponse hash.
+#----------------------------------------------------------------------
+sub ConvertResponseV2($)
+{
+    my ($geni_response) = @_;
+
+    my $decoder = Frontier::RPC2->new();
+    my $version = $geni_response->{"geni_api"};
+    my $am_code = GeniResponse::code($geni_response);
+    # For standard GENI errors, the geni_code is the same as our am_code
+    my $geni_code = $am_code;
+    if ($am_code < GeniResponse::GENIRESPONSE_SUCCESS() ||
+	$am_code > GeniResponse::GENIRESPONSE_ALREADYEXISTS()) {
+	# If the code is outside of the standard GENI code range, set
+	# the geni_code to ERROR
+	$geni_code = GeniResponse::GENIRESPONSE_ERROR();
+    }
+    my $blob = {
+	"value" => GeniResponse::value($geni_response),
+	"output" => GeniResponse::output($geni_response),
+	"code" => {
+	    "geni_code" => $geni_code,
+	    "am_code" => $am_code,
+	    "am_type" => "protogeni"
+	}
+    };
+    if (exists($geni_response->{'protogeni_error_log'})) {
+	$blob->{'code'}->{'protogeni_error_log'} =
+	    $geni_response->{'protogeni_error_log'};
+    }
+    if (exists($geni_response->{'protogeni_error_url'})) {
+	$blob->{'code'}->{'protogeni_error_url'} =
+	    $geni_response->{'protogeni_error_url'};
+    }
+
+    if (defined($version)) {
+	$blob->{"geni_api"} = $version;
+    }
+
+    return $decoder->encode_response($blob);
+}
+
+if ($GENI_VERSION eq "1.0") {
+    $GENI_RESPONSE_CONVERTER = \&ConvertResponseV1;
+} else {
+    $GENI_RESPONSE_CONVERTER = \&ConvertResponseV2;
+}
+
+1;

@@ -1,0 +1,114 @@
+#!/usr/bin/perl -w
+
+if (scalar(@ARGV) != 1) {
+    print "Usage: add_rack_nodes <type>\n";
+    exit(1);
+}
+
+my $type = $ARGV[0];
+
+our $TB = "/usr/testbed";
+our $IP_START = "155.98.34.11";
+
+use lib "/usr/testbed/lib";
+use libdb;
+use IPC::Open2;
+
+sub sequentialSystem($$)
+{
+  my $program = shift(@_);
+  my $input = shift(@_);
+  local(*CHILD_OUT, *CHILD_IN);
+  my $childpid = open2(*CHILD_OUT, *CHILD_IN, $program)
+    or die("Can't open program $program\n");
+  print CHILD_IN $input;
+  close(CHILD_IN);
+  waitpid($childpid, 0);
+  my @output = <CHILD_OUT>;
+  return join("", @output);
+}
+
+sub newAction(@)
+{
+  my $blob = "";
+  $blob .= "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n";
+  $blob .= "<newnode>\n";
+  my %actions = @_;
+  for my $key (keys(%actions)) {
+    $blob .= "  <attribute name=\"" . $key . "\">\n";
+    $blob .= "    <value>" . $actions{$key} . "</value>\n";
+    $blob .= "  </attribute>\n";
+  }
+  $blob .= "</newnode>\n";
+  return sequentialSystem("perl -wT ./newscript.in", $blob);
+}
+
+# Reboot Nodes
+# Wait for Nodes to Boot
+
+# Gather Node IDs
+my $nodeText = newAction("table" => "node",
+			 "command" => "list");
+my @nodeListText = split("\n", $nodeText);
+my @nodeList = ();
+foreach my $node (@nodeListText) {
+    my @fields = split(" ", $node);
+    if (scalar(@fields) >= 1) {
+	push(@nodeList, $fields[0]);
+    }
+}
+
+my @octets = split(/\./, $IP_START);
+if (scalar(@octets) != 4) {
+    print STDERR "Start IP Address is not a well-formed IPv4 address.\n";
+    print STDERR join(" -- ", @octets)."\n";
+    exit(1);
+}
+
+my %used_ips = ();
+my $dbresult = DBQueryFatal("select IP from interfaces where role='ctrl'");
+while (my ($ip) = $dbresult->fetchrow_array) {
+    $used_ips{$ip} = 1;
+}
+
+my %node2ip = ();
+foreach my $node (@nodeList) {
+    my $done = 0;
+    while (! $done) {
+	my $current = join(".", @octets);
+	if (! exists($used_ips{$current})) {
+	    $node2ip{$node} = $current;
+	    $done = 1;
+	}
+	$octets[3] += 1;
+	if ($octets[3] > 254) {
+	    $octets[3] = 1;
+	    $octets[2] += 1;
+	}
+	if ($octets[2] > 254) {
+	    $octets[2] = 1;
+	    $octets[1] += 1;
+	}
+	if ($octets[1] > 254) {
+	    $octets[1] = 1;
+	    $octets[0] += 1;
+	}
+    }
+}
+
+# Set Node Types
+foreach my $node (@nodeList) {
+    newAction("table" => "node",
+	      "id" => $node,
+	      "command" => "update",
+	      "type" => $type,
+	      "IP" => $node2ip{$node});
+}
+
+# Associate Interfaces with Switch Ports
+system("perl newnode_research.in");
+
+# Commit Changes
+foreach my $node (@nodeList) {
+    newAction("table" => "node", "id" => $node, "command" => "commit");
+}

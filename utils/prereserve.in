@@ -1,0 +1,529 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2003-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use strict;
+use English;
+use Getopt::Std;
+use Date::Parse;
+
+#
+# Set up and clear node pre-reservations.
+#
+sub usage()
+{
+    print STDERR "Usage: prereserve [-t typelist] [-n priority] ".
+	"[-s start] [-e end [-r]] pid count\n";
+    print STDERR "       prereserve -c [-r] pid\n";
+    print STDERR "       prereserve -i pid\n";
+    print STDERR "       prereserve -a pid\n";
+    print STDERR "       prereserve -l\n";
+    print STDERR "   -h   This message\n";
+    print STDERR "   -t   Comma separated list of node types\n";
+    print STDERR "   -n   Priority. Defaults to zero (least priority)\n";
+    print STDERR "   -c   Clear pending prereserve for project\n";
+    print STDERR "   -r   Revoke current prereserve for project (use with -c)\n";
+    print STDERR "   -i   Show pending prereserve for project\n";
+    print STDERR "   -l   List all pending prereserves\n";
+    print STDERR "   -s   Optional start time to begin pre reservation\n";
+    print STDERR "   -e   Optional end time for pre reservation.\n";
+    print STDERR "        Implies -c -r options at termination time.\n";
+    print STDERR "   -a   Activate a pending reservation (internal option)\n";
+    exit(-1);
+}
+my $optlist  = "hdct:n:ilre:s:ma";
+my $priority = 0;
+my $debug    = 0;
+my $info     = 0;
+my $list     = 0;
+my $clear    = 0;
+my $revoke   = 0;
+my $sendmail = 0;
+my $activate = 0;
+my $starttime;
+my $endtime;
+my $typelist;
+my $pid;
+my $count;
+
+# Protos
+sub fatal($);
+sub StartReservation($);
+
+#
+# Configure variables
+#
+my $TB		 = "@prefix@";
+my $TBOPS        = "@TBOPSEMAIL@";
+
+#
+# Testbed Support libraries
+#
+use lib "@prefix@/lib";
+use emdb;
+use NodeType;
+use Node;
+use libtestbed;
+use Experiment;
+use Project;
+use User;
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Untaint the path
+# 
+$ENV{'PATH'} = "/bin:/sbin:/usr/bin:";
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{h})) {
+    usage();
+}
+if (defined($options{n})) {
+    $priority = $options{n};
+}
+if (defined($options{c})) {
+    $clear = 1;
+}
+if (defined($options{r})) {
+    $revoke = 1;
+}
+if (defined($options{d})) {
+    $debug = 1;
+}
+if (defined($options{"m"})) {
+    $sendmail = 1;
+}
+if (defined($options{"a"})) {
+    $activate = 1;
+}
+if (defined($options{t})) {
+    $typelist = $options{t};
+}
+if (defined($options{i})) {
+    $info = 1;
+}
+if (defined($options{l})) {
+    $list = 1;
+}
+if (defined($options{"e"})) {
+    $endtime = $options{"e"};
+    if (!defined(str2time($endtime))) {
+	fatal("Could not parse -e option.");
+    }
+}
+if (defined($options{"s"})) {
+    $starttime = $options{"s"};
+    
+    if (!defined(str2time($starttime))) {
+	fatal("Could not parse -s option.");
+    }
+}
+
+if ($info || $clear || ($revoke && !$endtime)) {
+    usage()
+	if (@ARGV != 1 || ($revoke && !$clear));
+    
+    $pid = $ARGV[0];
+}
+elsif ($list) {
+    usage()
+	if (@ARGV);
+}
+elsif ($activate) {
+    usage()
+	if (@ARGV != 1);
+
+    exit(StartReservation($ARGV[0]));
+}
+else {
+    usage()
+	if (@ARGV != 2);
+    
+    $pid   = $ARGV[0];
+    $count = $ARGV[1];
+
+    if ($priority && ! ($priority =~ /^\d*$/)) {
+	usage();
+    }
+}
+
+#
+# List all pending prereserves.
+#
+if ($list) {
+    my $query_result = 
+	DBQueryFatal("select *,(count>0) as needed from node_reservations ".
+		     "order by needed desc, priority desc, created asc");
+
+    if ($query_result->numrows) {
+	printf("%-18s %-4s  %-3s  %-10s %-18s %-3s %s\n",
+	       "Project", "Need", "Got", "Creator", "Created", "Pri", "Types");
+	print "---------------------------------------------------------------------\n";
+    }
+    
+    while (my $row = $query_result->fetchrow_hashref()) {
+	my $pid     = $row->{'pid'};
+	my $count   = $row->{'count'};
+	my $created = $row->{'created'};
+	my $creator = $row->{'creator'};
+	my $types   = $row->{'types'} || "";
+	my $priority= $row->{'priority'};
+	my $starttime = $row->{'start'};
+	my $endtime   = $row->{'end'};
+	my $active    = $row->{'active'};
+	my $current = 0;
+    
+	my $current_result =
+	    DBQueryFatal("select count(*) from nodes where reserved_pid='$pid'");
+
+	($current) = $current_result->fetchrow_array()
+	    if ($current_result && $current_result->numrows);
+
+	printf("%-20s %-4d %-3d %-10s %-18s %-3d %s\n",
+	       $pid, $count, $current, $creator, $created,
+	       $priority, $types);
+
+	if (defined($starttime)) {
+	    print "  *** Starts: $starttime";
+	    if (! $active) {
+		print " (pending)";
+	    }
+	    if (defined($endtime)) {
+		print " Ends: $endtime";
+	    }
+	    print "\n";
+	}
+    }
+    exit(0);
+}
+
+my $project = Project->Lookup($pid);
+if (!defined($project)) {
+    fatal("No such project $pid\n");
+}
+my $pid_idx = $project->pid_idx();
+
+#
+# Show and exit.
+#
+if ($info) {
+    my $current = 0;
+    
+    my $nodes_result =
+	DBQueryFatal("select node_id from nodes where reserved_pid='$pid'");
+
+    ($current) = $nodes_result->numrows
+	if ($nodes_result && $nodes_result->numrows);
+    
+    my $query_result =
+	DBQueryFatal("select * from node_reservations ".
+		     "where pid_idx='$pid_idx'");
+
+    if ($query_result->numrows) {
+	my $row = $query_result->fetchrow_hashref();
+	my $pid     = $row->{'pid'};
+	my $count   = $row->{'count'};
+	my $created = $row->{'created'};
+	my $creator = $row->{'creator'};
+	my $types   = $row->{'types'} || "*";
+	my $priority= $row->{'priority'};
+	my $starttime = $row->{'start'};
+	my $endtime   = $row->{'end'};
+	my $active    = $row->{'active'};
+
+	printf("%-4s  %-3s %-10s %-18s %-3s %s\n",
+	       "Need", "Got", "Creator", "When", "Pri", "Types");
+	print "-------------------------------------------------------------\n";
+	printf("%-4s  %-3s %-10s %-18s %-3d %s\n",
+	       $count, $current, $creator, $created, $priority, $types);
+
+	if (defined($starttime)) {
+	    print "*** Starts: $starttime";
+	    if (! $active) {
+		print " (pending)";
+	    }
+	    if (defined($endtime)) {
+		print " Ends: $endtime";
+	    }
+	    print "\n";
+	}
+    }
+    if ($current) {
+	print "-------------------------------------------------------------\n";
+	printf("%-15s %-10s %-32s\n",
+	       "NodeID", "Type", "Pid/Eid");
+	print "-------------------------------------------------------------\n";
+
+	while (my ($node_id) = $nodes_result->fetchrow_array()) {
+	    my $node   = Node->Lookup($node_id);
+	    my $type   = $node->type();
+	    my $pideid = "--";
+
+	    if ($node->IsReserved()) {
+		$pideid = $node->pid() . "/" . $node->eid();
+	    }
+	    printf("%-15s %-10s %-32s\n", $node_id, $type, $pideid);
+	}
+    }
+    exit(0);
+}
+
+#
+# Verify user, must be admin or root.
+#
+my $this_user;
+if ($UID) {
+    $this_user = User->ThisUser();
+    if (! defined($this_user)) {
+	fatal("You ($UID) do not exist!");
+    }
+    if (!$this_user->IsAdmin()) {
+	fatal("You are not a testbed administrator!");
+    }
+}
+
+#
+# Clear and exit.
+#
+if ($clear) {
+    DBQueryFatal("delete from node_reservations where pid_idx='$pid_idx'");
+    if ($revoke) {
+	DBQueryFatal("update nodes set reserved_pid=null ".
+		     "where reserved_pid='$pid'");
+    }
+    exit(0);
+}
+
+#
+# Do not allow this as root; we want proper history.
+#
+if ($UID == 0) {
+    fatal("Please do not run this as root!");
+}
+my $uid = $this_user->uid();
+my $uid_idx = $this_user->uid_idx();
+
+# Sanity check the type list.
+if (defined($typelist)) {
+    my @types = split(",", $typelist);
+    foreach my $typename (@types) {
+	my $type = NodeType->Lookup($typename);
+	if (!defined($type)) {
+	    fatal("No such node type $typename");
+	}
+    }
+}
+
+# 
+# Lets say that a current request is an error. delete and recreate.
+#
+my $query_result =
+    DBQueryFatal("select * from node_reservations where pid_idx='$pid_idx'");
+
+if ($query_result->numrows) {
+    fatal("Already have a reservation request for $pid, please clear it first");
+}
+
+#
+# Enter the table info, but mark as not active until later.
+#
+my $typearg  = (defined($typelist)  ? ",types='$typelist'" : "");
+my $startarg = "";
+my $endarg   = "";
+
+if ($starttime) {
+    my $tmp = str2time($starttime);
+    $startarg = ",start=FROM_UNIXTIME($tmp)";
+}
+if ($endtime) {
+    my $tmp = str2time($endtime);
+    $endarg = ",end=FROM_UNIXTIME($tmp)";
+}
+DBQueryFatal("insert into node_reservations set ".
+	     "  pid='$pid', pid_idx='$pid_idx', count='$count', ".
+	     "  creator='$uid', creator_idx='$uid_idx', ".
+	     "  created=now(),active=0 $typearg $startarg $endarg");
+print "Node reservation request for $count nodes has been created.\n";
+
+#
+# Activate, although note that the cron job (prereserve_check) might
+# have beat us to it already. We check the active bit below.
+#
+if (!defined($starttime) || str2time($starttime) <= time()) {
+    exit(StartReservation($pid));
+}
+exit(0);
+
+#
+# Activate a reservation request; find as many nodes as possible,
+# and then mark it as active. 
+#
+sub StartReservation($)
+{
+    my ($pid) = @_;
+
+    DBQueryFatal("lock tables nodes write, node_types read, ".
+		 " node_reservations write, reserved read");
+    
+    my $query_result =
+	DBQueryFatal("select * from node_reservations where pid='$pid'");
+    if (!$query_result->numrows) {
+	fatal("No reservation defined for project");
+    }
+    my $row = $query_result->fetchrow_hashref();
+    my $active = $row->{'active'};
+    my $count  = $row->{'count'};
+    my $types  = $row->{'types'};
+    my @types  = (defined($types) ? split(",", $types) : ("*"));
+
+    # Someone beat us to it. 
+    if ($active) {
+	DBQueryFatal("unlock tables");
+	return 0;
+    }
+    
+    #
+    # First see if we can find enough (or any) nodes to satisfy the
+    # prereserve, from nodes already prereserved.
+    #
+    $query_result =
+	DBQueryFatal("select node_id from nodes where reserved_pid='$pid'");
+
+    my $current = $query_result->numrows;
+
+    if ($current) {
+	print "There are currently $current nodes with a pre-reservation ".
+	    "for project $pid.\n";
+	if ($current >= $count) {
+	    goto done;
+	}
+    }
+
+    #
+    # Then check free/allocated nodes of each type.
+    #
+    foreach my $type (@types) {
+	last
+	    if ($current >= $count);
+
+	my $tcount  = 0;
+	my $tclause = "";
+	if ($type ne "*") {
+	    $tclause = "and node_types.type='$type'";
+	}
+
+	#
+	# check for nodes already reserved to the project, but without
+	# reserved_pid set; they count against a prereserve request and
+	# also need to be updated.
+	#
+	$query_result =
+	    DBQueryFatal("select reserved.node_id from reserved ".
+			 "left join nodes on nodes.node_id=reserved.node_id ".
+			 "left join node_types on node_types.type=nodes.type ".
+			 "where nodes.role='testnode' and ".
+			 "      node_types.class='pc' and ".
+			 "      nodes.reserved_pid is null and ".
+			 "      reserved.pid='$pid' $tclause");
+	
+	while (my ($node_id) = $query_result->fetchrow_array()) {
+	    DBQueryFatal("update nodes set reserved_pid='$pid' ".
+			 "where node_id='$node_id'");
+	    $current++;
+	    $tcount++;
+	    last
+		if ($current >= $count);
+	}
+	if ($tcount) {
+	    print "Set reserved_pid for $tcount (allocated)" .
+		($type eq "*" ? "" : " $type") . " nodes.\n";
+
+	    last
+		if ($current >= $count);
+	}
+
+	$query_result =
+	    DBQueryFatal("select nodes.node_id from nodes ".
+			 "left join reserved on ".
+			 "     reserved.node_id=nodes.node_id ".
+			 "left join node_types on node_types.type=nodes.type ".
+			 "where reserved.node_id is null and ".
+			 "      nodes.role='testnode' and ".
+			 "      node_types.class='pc' and ".
+			 "      nodes.reserved_pid is null $tclause");
+
+	$tcount = 0;
+	while (my ($node_id) = $query_result->fetchrow_array()) {
+	    DBQueryFatal("update nodes set reserved_pid='$pid' ".
+			 "where node_id='$node_id'");
+	    $current++;
+	    $tcount++;
+	    last
+		if ($current >= $count);
+	}
+	if ($tcount) {
+	    print "Set reserved_pid for $tcount (free)" .
+		($type eq "*" ? "" : " $type") . " nodes.\n";
+	}
+    }
+    if ($current >= $count) {
+	print "Got as many nodes as you wanted. Yippie!\n";
+    }
+    #
+    # Update the reservation entry, and mark as active.
+    #
+  done:
+    $count -= $current;
+    $count = 0 if ($count < 0);
+
+    DBQueryFatal("update node_reservations set ".
+		 "       count='$count',active=1 ".
+		 "where pid='$pid'");
+    DBQueryFatal("unlock tables");
+
+    if ($count == 0 && $sendmail) {
+	SENDMAIL($TBOPS, "Pre Reservation for $pid has completed",
+		 "The pre reservation request for project $pid, ".
+		 "has been fullfilled\n", $TBOPS);
+    }
+    return 0
+}
+
+sub fatal($)
+{
+    my ($mesg) = $_[0];
+
+    die("*** $0:\n".
+	"    $mesg\n");
+}
+

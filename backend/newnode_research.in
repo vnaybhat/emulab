@@ -1,0 +1,252 @@
+#!/usr/bin/perl -w
+#
+# Usage: newnode_research.pl [node_id [...]]
+#
+# Uses switchmac to look up MAC addresses of experimental node
+# interfaces and discover the switch card, switch port, and role of
+# those interfaces.
+#
+
+#
+# Configure variables
+#
+#my $TB         = "@prefix@";
+my $TB = "/usr/testbed/";
+my $ELABINELAB = 1;
+my $SWITCHMAC = "$TB/libexec/switchmac";
+
+use English;
+use lib "/usr/testbed/lib";
+use libdb;
+use User;
+use NodeType;
+
+my $whereclause;
+
+foreach my $arg (@ARGV) {
+    if (! defined($whereclause)) {
+	$whereclause = "WHERE ";
+    } else {
+	$whereclause .= "OR ";
+    }
+    $whereclause .= "n.node_id='$arg' "
+}
+
+if (! defined($whereclause)) {
+    $whereclause = "";
+}
+
+#
+# Map invoking user to object. 
+# If invoked as "nobody" we are coming from the web interface and the
+# current user context is "implied" (see tbauth.php3).
+#
+my $this_user;
+
+if (getpwuid($UID) ne "nobody") {
+    $this_user = User->ThisUser();
+
+    if (! defined($this_user)) {
+	fatal("You ($UID) do not exist!");
+    }
+    fatal("You must have admin privledges to create new nodes")
+	if (!$this_user->IsAdmin());
+} else {
+    $this_user = User->ImpliedUser();
+    if (! defined($this_user)) {
+	fatal("Cannot determine implied user!");
+    }
+}
+
+sub find_switch_macs(@)
+{
+    my %mac_list = @_;
+
+    my $macs = `$SWITCHMAC 2>&1`;
+
+    #
+    # XXX - error checking
+    #
+    my @lines = split("\n", $macs);
+    for my $line (@lines) {
+	chomp($line);
+	my @exploded = split(",", $line);
+        my $MAC = $exploded[0];
+        my $switchport = $exploded[1];
+        my $vlan = $exploded[2];
+        my $iface_name = $exploded[3];
+        my $class = $exploded[4];
+	if ($switchport =~ /^([\w-]+)\/(\d+)\.(\d+)$/) {
+	    my $switch = $1;
+	    my $card = $2;
+	    my $port = $3;
+
+	    my $iface = $mac_list{$MAC};
+	    if (defined($iface) &&
+		(! defined($iface->{'class'}) ||
+		 $iface->{'class'} eq $class)) {
+		$iface->{'switch'} = $switch;
+		$iface->{'switch_card'} = $card;
+		$iface->{'switch_port'} = $port;
+		if ($ELABINELAB) {
+		    $iface->{'class'} = $class;
+		    $iface->{'iface'} = $iface_name;
+		}
+	    }
+	} else {
+	    print STDERR "Bad line from switchmac: $line\n";
+	}
+    }
+}
+
+%type2protocols=();
+
+#
+# Get the MACs we are supposed to be looking for
+#
+my $query_result =
+    DBQueryFatal("select i.new_interface_id, i.mac, i.new_node_id, ".
+		 "n.node_id, i.card, n.type, i.interface_type ".
+		 "   from new_interfaces as i ".
+		 "left join new_nodes as n on ".
+		 "    i.new_node_id = n.new_node_id " .
+		 "left join node_types as t on n.type = t.type " .
+		 "$whereclause");
+@mac_list = ();
+while (my ($new_interface_id, $mac, $new_node_id, $node_id,
+	   $card, $node_type, $itype) = $query_result->fetchrow_array) {
+    my $iface = "eth$card";
+
+    # Figure out if this interface is the control interface for the type.
+    my $class;
+    my $control_iface;
+    my $type = NodeType->Lookup($node_type);
+    if (defined($type)) {
+	$control_iface = $type->GetAttribute("control_interface");
+    }
+
+    if (! $ELABINELAB && defined($control_iface)) {
+      if ($iface eq $control_iface) {
+	  $class = TBDB_IFACEROLE_CONTROL;
+      }
+      else {
+	  $class = TBDB_IFACEROLE_EXPERIMENT;
+      }
+    }
+
+    my $protocols = $type2protocols{$itype};
+    if (! defined($protocols)) {
+	my $proto_result =
+	    DBQueryFatal("select capval from interface_capabilities ".
+			 "where capkey='protocols' and type='$itype'");
+	while (my ($proto_value) = $proto_result->fetchrow_array) {
+	    $protocols = $proto_value;
+	    $type2protocols{$itype} = $protocols;
+	}
+    }
+    $mac_list{$mac} = {"id" => $new_interface_id,
+		       "new_node_id" => $new_node_id,
+		       "node_id" => $node_id,
+		       "card" => $card,
+		       "protocols" => $protocols,
+		       "class" => $class};
+}
+
+#print STDERR "Looking for MACs, this could take a while...\n";
+find_switch_macs(%mac_list);
+
+#
+# Ick, Ick, Ick. Must reorder the interfaces so that they are
+# the same as the outside Emulab, so that when we request the
+# outer emulab to create a vlan, both are talking about the same
+# interface. This is of course, bogus. I think I will have to
+# change it so that we use the MACs instead of the iface name.
+# That should be an easy change to snmpit_remote and the xmlrpc
+# server stub (or the proxy I guess).
+
+#
+# Figure out proper order. This is the sort order of (protocols,
+# iface_name) for nodes with an iface_name and (protocols,
+# original_card) for those without. The former precedes the latter.
+#
+# iface_name is given to us if we are an elabinelab and the interface
+# is attached to a switch.
+#
+
+my %iface_sort = ();
+my %card_sort = ();
+foreach my $key (keys(%mac_list)) {
+    my $card = $mac_list{$key}->{'card'};
+    my $iface = $mac_list{$key}->{'iface'};
+    my $protocols = $mac_list{$key}->{'protocols'};
+    if (defined($protocols)) {
+	if (defined($iface) && $iface ne 'unknown') {
+	    $iface_sort{"$protocols:$iface:$key"} = $key;
+	} else {
+	    $card_sort{"$protocols:$card:$key"} = $key;
+	}
+    } else {
+	print STDERR "Protocols not defined on new_interface_id ".
+	    $mac_list{$key}->{'id'} . "\n";
+    }
+}
+
+my $current_card = 0;
+foreach my $iface_key (sort(keys(%iface_sort))) {
+    $mac_list{$iface_sort{$iface_key}}->{'card'} = $current_card;
+#    my $id = $mac_list{$iface_sort{$iface_key}}->{'id'};
+#    my $card = $mac_list{$iface_sort{$iface_key}}->{'iface'};
+#    print STDERR "iface $id:$card\n";
+    ++$current_card;
+}
+
+foreach my $card_key (sort(keys(%card_sort))) {
+    $mac_list{$card_sort{$card_key}}->{'card'} = $current_card;
+#    my $id = $mac_list{$card_sort{$card_key}}->{'id'};
+#    my $card = $mac_list{$card_sort{$card_key}}->{'card'};
+#    print STDERR "card $id:$card\n";
+    ++$current_card;
+}
+
+#
+# Now move them to the proper location, as specifed by the sort order.
+# 
+foreach my $key (keys(%mac_list)) {
+    my $id = $mac_list{$key}->{'id'};
+    my $card = $mac_list{$key}->{'card'};
+
+    DBQueryFatal("update new_interfaces set card='$card'" .
+		 "where new_interface_id='$id'");
+}
+
+foreach my $key (keys(%mac_list)) {
+    if (defined($mac_list{$key}->{'switch'})) {
+	my $extra_set = "";
+	
+	if ($ELABINELAB) {
+	    #
+	    # The reason for these ELABINELAB tests is that we cannot
+	    # use the node_types table to determine which interface is
+	    # the control network, since assign can pick any old interface
+	    # for each inner node. Generally speaking, we should not do
+	    # this at all, but rely on an outside mechanism to tell us
+	    # which interface is the control network. Anyway, I am using
+	    # the "role" slot of the new_interfaces table to override
+	    # what utils/newnode is going to set them too. 
+	    #
+	    $extra_set = "role='".$mac_list{$key}->{'class'}."', ";
+	}
+	my $switch = $mac_list{$key}->{'switch'};
+	my $switch_card = $mac_list{$key}->{'switch_card'};
+	my $switch_port = $mac_list{$key}->{'switch_port'};
+	my $id = $mac_list{$key}->{'id'};
+	DBQueryFatal("UPDATE new_interfaces SET $extra_set " .
+		     "switch_id='$switch', " .
+		     "switch_card='$switch_card', " .
+		     "switch_port='$switch_port' ".
+		     "WHERE new_interface_id='$id'");
+    } else {
+	print STDERR "Unable to find " . $mac_list{$key}->{'node_id'} . ":" .
+	    $mac_list{$key}->{'card'} . " on switches, not updating\n";
+    }
+}

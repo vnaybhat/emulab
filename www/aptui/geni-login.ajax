@@ -1,0 +1,377 @@
+<?php
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+chdir("..");
+include_once("geni_defs.php");
+chdir("apt");
+include_once("instance_defs.php");
+
+#
+# So we can capture stderr. Sheesh.
+# 
+function myexec($cmd)
+{
+    ignore_user_abort(1);
+
+    $myexec_output_array = array();
+    $myexec_output       = "";
+    $myexec_retval       = 0;
+    
+    exec("$cmd 2>&1", $myexec_output_array, $myexec_retval);
+    if ($myexec_retval) {
+	for ($i = 0; $i < count($myexec_output_array); $i++) {
+	    $myexec_output .= "$myexec_output_array[$i]\n";
+	}
+	$foo  = "Shell Program Error. Exit status: $myexec_retval\n";
+	$foo .= "  '$cmd'\n";
+	$foo .= "\n";
+	$foo .= $myexec_output;
+	TBERROR($foo, 0);
+	return 1;
+    }
+    return 0;
+}
+
+#
+# Return info to allow the client to load and start the auth process.
+# This is entirely cause we want to have a login button on each page,
+# but not have to load all the signer stuff unless its actually used.
+#
+function Do_GetSignerInfo()
+{
+    $hash = GENHASH();
+
+    # We use a session to hold stuff across the ajax calls
+    session_start();
+    session_regenerate_id(TRUE);
+
+    $blob = array();
+    $blob["HOST"]  = "https://ch.geni.net:8444";
+    $blob["PATH"]  = "/xml-signer/index.html";
+    $blob["ID"]    = "urn:publicid:IDN+emulab.net+authority+sa";
+    $blob["AUTH"]  = "https://ch.geni.net:8444/xml-signer/geni-auth.js";
+    $blob["CERT"]  = 
+	"-----BEGIN CERTIFICATE-----\n" .
+	"MIIDoTCCAwqgAwIBAgIDAS/uMA0GCSqGSIb3DQEBBAUAMIG4MQswCQYDVQQGEwJV\n" .
+	"UzENMAsGA1UECBMEVXRhaDEXMBUGA1UEBxMOU2FsdCBMYWtlIENpdHkxHTAbBgNV\n" .
+	"BAoTFFV0YWggTmV0d29yayBUZXN0YmVkMR4wHAYDVQQLExVDZXJ0aWZpY2F0ZSBB\n" .
+	"dXRob3JpdHkxGDAWBgNVBAMTD2Jvc3MuZW11bGFiLm5ldDEoMCYGCSqGSIb3DQEJ\n" .
+	"ARYZdGVzdGJlZC1vcHNAZmx1eC51dGFoLmVkdTAeFw0xMTEwMDUxOTUxMDZaFw0x\n" .
+	"NzAzMjcyMDUxMDZaMIGsMQswCQYDVQQGEwJVUzENMAsGA1UECBMEVXRhaDEdMBsG\n" .
+	"A1UEChMUVXRhaCBOZXR3b3JrIFRlc3RiZWQxFjAUBgNVBAsTDXV0YWhlbXVsYWIu\n" .
+	"c2ExLTArBgNVBAMTJDJiNDM3ZmFhLWFhMDAtMTFkZC1hZDFmLTAwMTE0M2U0NTNm\n" .
+	"ZTEoMCYGCSqGSIb3DQEJARYZdGVzdGJlZC1vcHNAZmx1eC51dGFoLmVkdTCBnzAN\n" .
+	"BgkqhkiG9w0BAQEFAAOBjQAwgYkCgYEA1ayN3cGHH9hsmTgVWVjb2ZOqF8zFJ1Ew\n" .
+	"TFRpXVtI//wk05+Z7uunpxn/QL1F3NjdcIEToEupo1q2tRUfCc2hquLBgC5zNfut\n" .
+	"YD/b5ukEsF5COKHb+pYl2RZly9BVckt+ySFLnC23erKW7ILyO2fGBD/QzHZNPhdY\n" .
+	"/fs18iCh58cCAwEAAaOBwjCBvzAdBgNVHQ4EFgQUU2CjacFUMyUNL++CplFi++MF\n" .
+	"Sl0wMwYDVR0RBCwwKoYodXJuOnB1YmxpY2lkOklETitlbXVsYWIubmV0K2F1dGhv\n" .
+	"cml0eStzYTAPBgNVHRMBAf8EBTADAQH/MFgGCCsGAQUFBwEBBEwwSjBIBhRpg8yT\n" .
+	"gKiYzKjHvbGngICqrteKG4YwaHR0cHM6Ly93d3cuZW11bGFiLm5ldDoxMjM2OS9w\n" .
+	"cm90b2dlbmkveG1scnBjL3NhMA0GCSqGSIb3DQEBBAUAA4GBAIDXwcvEu3HJApFQ\n" .
+	"bQduTiHGXQ8Og/2ZIFLXHkqu4SW81RaYVbHwRFxnKHOktKm7js9wjEPo/F0tqIRT\n" .
+	"21x7yE7uOce/8tWNW241fVuIRyO/o/DNd/FVFyFU5WNqP6f/rzEu92iuO6zIJPBg\n" .
+	"fmkqRvZqMOm5R//SSNBFl83lZzlu\n" .
+	"-----END CERTIFICATE-----";
+
+    SPITAJAX_RESPONSE($blob);
+}
+
+#
+# 
+#
+function Do_CreateSecret()
+{
+    global $ajax_args;
+    global $TBDIR;
+
+    #
+    # Destroy any existing session data to prevent replay.
+    #
+    if (!(session_start() &&
+	  session_destroy())) {
+	SPITAJAX_ERROR(-1, "Internal session error 1");
+	return;
+    }
+    session_commit();
+    if (!session_start()) {
+	SPITAJAX_ERROR(-1, "Internal session error 2");
+	return;
+    }
+    
+    if (!isset($ajax_args["certificate"])) {
+	SPITAJAX_ERROR(1, "Missing user public key");
+	return;
+    }
+    $certificate = $ajax_args["certificate"];
+
+    if (!isset($ajax_args["r1_encrypted"])) {
+	SPITAJAX_ERROR(1, "Missing encrypted random string");
+	return;
+    }
+    $r1_encrypted = $ajax_args["r1_encrypted"];
+    $r2_decrypted = GENHASH();
+
+    $infname  = tempnam("/tmp", "pkcs7in");
+    $outfname = tempnam("/tmp", "pkcs7out");
+    $userCertName = tempnam("/tmp", "pkcs7cert");
+
+    #
+    # Decrypt the random bytes. To do this we have to put the stuff
+    # into a file, and it is decrypted into a file which we have to read.
+    #
+    $fp = fopen($infname, "w");
+    fwrite($fp, $r1_encrypted);
+    fclose($fp);
+
+    $retval =
+	myexec("/usr/bin/openssl smime -decrypt -inform PEM -inkey ".
+	       "${TBDIR}/etc/genisa.pem -in $infname -out $outfname");
+
+    if ($retval) {
+	SPITAJAX_ERROR(-1, "Internal decryption error");
+	return;
+    }
+    $r1_decrypted = file_get_contents($outfname);
+    $r1_decrypted = rtrim($r1_decrypted);
+
+    #
+    # Now encrypt the random bytes.
+    #
+    $fp = fopen($infname, "w");
+    fwrite($fp, $r2_decrypted);
+    fclose($fp);
+
+    $fp = fopen($userCertName, "w");
+    fwrite($fp, $certificate);
+    fclose($fp);
+
+    $retval =
+	myexec("/usr/bin/openssl smime -encrypt -outform PEM ".
+	       "-in $infname -out $outfname -aes256 $userCertName");
+
+    if ($retval) {
+	SPITAJAX_ERROR(-1, "Internal encryption error");
+	return;
+    }
+    $r2_encrypted = file_get_contents($outfname);
+    $secret = $r1_decrypted . $r2_decrypted;
+
+    $blob = array();
+    $blob["r2_encrypted"] = $r2_encrypted;
+
+    # Store in the session.
+    $_SESSION["secret"] = $secret;
+    $_SESSION["certificate"]  = $certificate;
+    session_commit();
+
+    unlink($infname);
+    unlink($outfname);
+    unlink($userCertName);
+    SPITAJAX_RESPONSE($blob);
+}
+
+#
+# 
+#
+function Do_VerifySpeaksfor()
+{
+    global $ajax_args;
+    global $TBDIR, $COOKDIEDOMAIN;
+    global $TBAUTHCOOKIE, $TBLOGINCOOKIE, $TBAUTHTIMEOUT, $TBNAMECOOKIE;
+
+    # Restore the session.
+    if (!session_start()) {
+	SPITAJAX_ERROR(-1, "Internal session error 3");
+	return;
+    }
+
+    if (!isset($ajax_args["speaksfor"]) || $ajax_args["speaksfor"] == "") {
+	SPITAJAX_ERROR(1, "Missing speaksfor credential");
+	session_destroy();
+	return;
+    }
+    $speaksfor = $ajax_args["speaksfor"];
+
+    if (!isset($ajax_args["signature"]) || $ajax_args["signature"] == "") {
+	SPITAJAX_ERROR(1, "Missing signature for the credential");
+	session_destroy();
+	return;
+    }
+    $signature = $ajax_args["signature"];
+
+    if (!isset($_SESSION["secret"]) || $_SESSION["secret"] == "") {
+	SPITAJAX_ERROR(1, "What is your secret?");
+	session_destroy();
+	return;
+    }
+
+    #
+    # Really the SHA256(speaksfor + secret). We need to verify that.
+    #
+    $secret = $_SESSION["secret"];
+    $hash   = hash("sha256", $speaksfor . $secret);
+    if ($hash != $signature) {
+	SPITAJAX_ERROR(1, "Bad signature on credential");
+	session_destroy();
+	return;
+    }
+
+    $infname  = tempnam("/tmp", "certin");
+    $outfname = tempnam("/tmp", "certout");
+
+    #
+    # The certificate belongs to the user and tells us who it is via
+    # the URN. Use external script to parse the certificate and tell
+    # us whats in it. We get back some simple XML.
+    #
+    $fp = fopen($infname, "w");
+    fwrite($fp, $_SESSION["certificate"]);
+    fclose($fp);
+
+    $retval = 
+	myexec("$TBDIR/sbin/protogeni/parsecert $infname $outfname");
+
+    if ($retval) {
+	SPITAJAX_ERROR(-1, "Internal certificate parse error");
+	session_destroy();
+	return;
+    }
+    $parse_output = file_get_contents($outfname);
+    unlink($infname);
+    unlink($outfname);
+
+    #
+    # Decode simple XML that is returned. 
+    #
+    $parsed = simplexml_load_string($parse_output);
+    if (!$parsed) {
+	TBERROR("Could not parse XML output:\n$parse_output\n", 0);
+	SPITAJAX_ERROR(-1, "Internal Error");
+	session_destroy();
+	return;
+    }
+    $info = array();
+    foreach ($parsed->attribute as $attribute) {
+	$info[(string)$attribute['name']] = (string)$attribute;
+    }
+
+    #
+    # Find the user and log them in, returning the cookies to the caller.
+    #
+    $this_user = User::LookupNonLocal($info["urn"]);
+    if (!$this_user) {
+	if (CreateNonLocalUser($info["urn"], $info["email"])) {
+	    SPITAJAX_ERROR(-1, "Internal error creating new user");
+	    session_destroy();
+	    return;
+	}
+	$this_user = User::LookupNonLocal($info["urn"]);
+	if (!$this_user) {
+	    SPITAJAX_ERROR(-1, "Internal error looking up new user");
+	    session_destroy();
+	    return;
+	}
+    }
+    if (UpdateCredentials($this_user, $_SESSION["certificate"], $speaksfor)) {
+	SPITAJAX_ERROR(-1, "Internal error updating user credentials");
+	session_destroy();
+	return;
+    }
+    
+    list ($loginhash, $logincrc) =
+	DOLOGIN_MAGIC($this_user->uid(), $this_user->uid_idx(), null, 0, 1);
+    if (! ($loginhash && $logincrc)) {
+	SPITAJAX_ERROR(1, "Could not log you in. Sorry!");
+	session_destroy();
+	return;
+    }
+    $blob = array();
+    $blob["domain"]    = $COOKDIEDOMAIN;
+    $blob["hashname"]  = $TBAUTHCOOKIE;
+    $blob["hash"]      = $loginhash;
+    $blob["crcname"]   = $TBLOGINCOOKIE;
+    $blob["crc"]       = $logincrc;
+    $blob["username"]  = $TBNAMECOOKIE;
+    $blob["user"]      = $this_user->uid_idx();
+    $blob["timeout"]   = time() + $TBAUTHTIMEOUT;
+    $blob["url"]       = (Instance::UserHasInstances($this_user)
+			  ? "myexperiments.php" : "instantiate.php");
+    session_destroy();
+    SPITAJAX_RESPONSE($blob);
+}
+
+#
+# Create a new user. All we have is the email, urn, and uuid.
+#
+function CreateNonLocalUser($urn, $email)
+{
+    global $TBOPSPID;
+    $safe_urn = escapeshellarg($urn);
+    $safe_email = escapeshellarg($email);
+    
+    $retval = SUEXEC("elabman", $TBOPSPID,
+		     "webcreategeniuser $safe_urn $safe_email",
+		     SUEXEC_ACTION_CONTINUE);
+    if ($retval)
+	return -1;
+
+    return 0;
+}
+
+#
+# Update the certificate/credential for the user.
+# 
+function UpdateCredentials($user, $cert, $cred)
+{
+    $uid = $user->uid();
+    
+    $credfile = tempnam("/tmp", "cert");
+    $certfile = tempnam("/tmp", "cred");
+
+    $fp = fopen($credfile, "w");
+    fwrite($fp, $cred);
+    fclose($fp);
+    $fp = fopen($certfile, "w");
+    fwrite($fp, $cert);
+    fclose($fp);
+    chmod($certfile, 0666);
+    chmod($credfile, 0666);
+    
+    $retval = SUEXEC($uid, "CloudLab",
+		     "webupdategeniuser -c $credfile -e $certfile $uid",
+		     SUEXEC_ACTION_CONTINUE);
+
+    unlink($credfile);
+    unlink($certfile);
+    
+    if ($retval)
+	return -1;
+
+    return 0;
+}
+
+# Local Variables:
+# mode:php
+# End:
+?>

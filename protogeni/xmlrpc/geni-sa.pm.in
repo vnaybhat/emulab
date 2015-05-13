@@ -1,0 +1,79 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2008-2013 University of Utah and the Flux Group.
+# 
+# {{{GENIPUBLIC-LICENSE
+# 
+# GENI Public License
+# 
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and/or hardware specification (the "Work") to
+# deal in the Work without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Work, and to permit persons to whom the Work
+# is furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Work.
+# 
+# THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE WORK OR THE USE OR OTHER DEALINGS
+# IN THE WORK.
+# 
+# }}}
+#
+use strict;
+use English;
+use Frontier::Responder;
+use Frontier::RPC2;
+
+# Do this early so that we talk to the right DB.
+use vars qw($GENI_DBNAME $GENI_METHODS $EMULAB_PEMFILE
+	    $GENI_RESPONSE_CONVERTER);
+BEGIN { $GENI_DBNAME = "geni"; }
+
+# Configure variables
+my $ETCDIR         = "@prefix@/etc";
+$EMULAB_PEMFILE    = "$ETCDIR/genisa.pem";
+
+# Testbed libraries.
+use lib '@prefix@/lib';
+use GeniStdSA;
+use GeniResponse;
+
+$GENI_METHODS = {
+    # SLICE_INFO
+    "get_version"                  => \&GeniStdSA::GetVersion,
+    "create_slice"                 => \&GeniStdSA::CreateSlice,
+    "lookup_slices"                => \&GeniStdSA::LookupSlices,
+    "update_slice"                 => \&GeniStdSA::UpdateSlice,
+    "get_credentials"              => \&GeniStdSA::GetCredentials,
+
+    # SLICE_MEMBERS
+    "modify_slice_membership"      => \&GeniStdSA::ModifySliceMembership,
+    "lookup_slice_members"         => \&GeniStdSA::LookupSliceMembers,
+    "lookup_slices_for_member"     => \&GeniStdSA::LookupSlicesForMember,
+
+    # SLIVER INFO
+    "create_sliver_info"           => \&GeniStdSA::CreateSliverInfo,
+    "update_sliver_info"           => \&GeniStdSA::UpdateSliverInfo,
+    "delete_sliver_info"           => \&GeniStdSA::DeleteSliverInfo,
+    "lookup_sliver_info"           => \&GeniStdSA::LookupSliverInfo,
+
+    # PROJECT_SERVICE
+    "create_project"               => \&GeniStdSA::CreateProject,
+    "lookup_projects"              => \&GeniStdSA::LookupProjects,
+    "update_project"               => \&GeniStdSA::UpdateProject,
+
+    # PROJECT_SERVICE
+    "modify_project_membership"    => \&GeniStdSA::ModifyProjectMembership,
+    "lookup_project_members"       => \&GeniStdSA::LookupProjectMembers,
+    "lookup_projects_for_member"   => \&GeniStdSA::LookupProjectsForMember,
+};
+
+1;

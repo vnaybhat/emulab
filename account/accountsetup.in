@@ -1,0 +1,373 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2010-2014 University of Utah and the Flux Group.
+# 
+# {{{GENIPUBLIC-LICENSE
+# 
+# GENI Public License
+# 
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and/or hardware specification (the "Work") to
+# deal in the Work without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Work, and to permit persons to whom the Work
+# is furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Work.
+# 
+# THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE WORK OR THE USE OR OTHER DEALINGS
+# IN THE WORK.
+# 
+# }}}
+#
+use strict;
+use English;
+use Getopt::Std;
+use Data::Dumper;
+
+#
+# Setup accounts/projects/group stuff on ops/fs. This is installed on
+# op/fs and invoked from boss by tbaccy and the proj/group scripts/
+#
+sub usage()
+{
+    print "Usage: accountsetup adduser ...\n";
+    print "       accountsetup deluser ...\n";
+    print "       accountsetup moduser ...\n";
+    print "       accountsetup addproject ...\n";
+    print "       accountsetup addgroup ...\n";
+    print "       accountsetup delproject ...\n";
+    print "       accountsetup delgroup ...\n";
+    exit(1);
+}
+my $optlist    = "dnf";
+my $debug      = 0;
+my $force      = 0;
+my $impotent   = 0;
+
+#
+# Configure variables
+#
+my $TB		      = "@prefix@";
+my $WITHZFS	      = @WITHZFS@;
+my $ZFS_ROOT          = "@ZFS_ROOT@";
+my $ZFS_QUOTA_USER    = "@ZFS_QUOTA_USER@";
+my $ZFS_QUOTA_PROJECT = "@ZFS_QUOTA_PROJECT@";
+my $ZFS_QUOTA_GROUP   = "@ZFS_QUOTA_GROUP@";
+my $USERADD	      = "/usr/sbin/pw useradd";
+my $USERDEL	      = "/usr/sbin/pw userdel";
+my $USERMOD	      = "/usr/sbin/pw usermod";
+my $GROUPADD          = "/usr/sbin/pw groupadd";
+my $GROUPDEL          = "/usr/sbin/pw groupdel";
+my $CHPASS	      = "/usr/bin/chpass";
+my $ZFS		      = "/sbin/zfs";
+my $SKEL	      = "/usr/share/skel";
+
+# XXX
+my $NOSUCHUSER  = 67;
+my $USEREXISTS  = 65;
+
+#
+# Testbed Support libraries
+#
+use lib "@prefix@/lib";
+use libtestbed;
+
+# Defined in libtestbed;
+my $PROJROOT    = PROJROOT();
+my $GROUPROOT   = GROUPROOT();
+
+#
+# Function prototypes
+#
+sub AddUser();
+sub DeleteUser();
+sub ModifyUser();
+sub AddProject();
+sub AddGroup();
+sub DelProject();
+sub DelGroup();
+sub fatal($);
+sub ZFSexists($);
+
+#
+# Check args.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"f"})) {
+    $force = 1;
+}
+if (defined($options{"n"})) {
+    $impotent = 1;
+}
+usage()
+    if (@ARGV < 1);
+
+my $cmd = shift(@ARGV);
+
+#
+# Now dispatch operation.
+#
+SWITCH: for ($cmd) {
+    /^adduser$/ && do {
+	AddUser();
+	last SWITCH;
+    };
+    /^deluser$/ && do {
+	DeleteUser();
+	last SWITCH;
+    };
+    /^moduser$/ && do {
+	ModifyUser();
+	last SWITCH;
+    };
+    /^addproject$/ && do {
+	AddProject();
+	last SWITCH;
+    };
+    /^addgroup$/ && do {
+	AddGroup();
+	last SWITCH;
+    };
+    /^delproject$/ && do {
+	DelProject();
+	last SWITCH;
+    };
+    /^delgroup$/ && do {
+	DelGroup();
+	last SWITCH;
+    };
+    # Default
+    usage();
+}
+exit(0);
+
+sub AddUser()
+{
+    if (@ARGV < 6) {
+	fatal("adduser: Wrong number of arguments");
+    }
+    
+    my $user  = shift(@ARGV);
+    my $uid   = shift(@ARGV);
+    my $name  = shift(@ARGV);
+    my $hdir  = shift(@ARGV);
+    my $gid   = shift(@ARGV);
+    my $shell = shift(@ARGV);
+    my $hash  = (@ARGV ? shift(@ARGV) : undef);
+
+    if ($WITHZFS) {
+	my $path = "${ZFS_ROOT}${hdir}";
+	if (!ZFSexists($path)) {
+	    system("$ZFS create -o quota=${ZFS_QUOTA_USER} $path");
+	    if ($?) {
+		fatal("Could not create ZFS $path");
+	    }
+	}
+    }
+
+    if (system("egrep -q -s '^${user}:' /etc/passwd") &&
+	system("$USERADD $user -u $uid -c \"$name\" ".
+	       "-k $SKEL -h - -m -d $hdir -g $gid -s $shell")) {
+	if (($? >> 8) != $USEREXISTS) {
+	    fatal("$USERADD: could not add account");
+	}
+    }
+    if ($WITHZFS) {
+	#
+	# Since the directory exists before the useradd call, the skeleton
+	# files are not copied in. Do that now.
+	#
+	if (! -e "$hdir/.cshrc") {
+	    opendir(DIR, "$SKEL") or
+		fatal("Unable to open skeleton directory");
+	    while (my $file = readdir(DIR)) {
+		if ($file =~ /^dot(.*)$/) {
+		    system("/bin/cp -fp $SKEL/$file $hdir/$1") == 0
+			or fatal("Could not copy $SKEL/$file to $hdir/$1");
+		}
+	    }
+	}
+	#
+	# And for the same reason, need to chown/chgrp everything. 
+	#
+	system("/usr/sbin/chown -R $user:$gid $hdir") == 0
+	    or fatal("Could not chown $hdir");
+    }
+    if (defined($hash) &&
+	system("$CHPASS -p '$hash' $user")) {
+	fatal("Could not initialize password");
+    }
+    return 0;
+}
+
+sub DeleteUser()
+{
+    if (@ARGV != 2) {
+	fatal("deluser: Wrong number of arguments");
+    }
+    my $user  = shift(@ARGV);
+    my $hdir  = shift(@ARGV);
+
+    if (system("$USERDEL $user")) {
+	if (($? >> 8) != $NOSUCHUSER) {
+	    fatal("Could not remove user $user");
+	}
+    }
+    if ($WITHZFS) {
+	my $path = "${ZFS_ROOT}${hdir}";
+	if (ZFSexists($path)) {
+	    system("$ZFS unmount -f $path");
+	    system("$ZFS destroy $path");
+	    if ($?) {
+		fatal("Could not destroy ZFS $path");
+	    }
+	}
+    }
+    return 0;
+}
+
+sub ModifyUser()
+{
+    fatal("moduser: Not implemented yet");
+}
+
+sub AddProject()
+{
+    if (@ARGV != 3) {
+	fatal("addproject: Wrong number of arguments");
+    }
+    my $name      = shift(@ARGV);
+    my $unix_name = shift(@ARGV);
+    my $gid       = shift(@ARGV);
+
+    if ($WITHZFS) {
+	my $path = "${ZFS_ROOT}${PROJROOT}/$name";
+	if (!ZFSexists($path)) {
+	    system("$ZFS create -o quota=${ZFS_QUOTA_PROJECT} $path");
+	    if ($?) {
+		fatal("Could not create ZFS $path");
+	    }
+	}
+	$path = "${ZFS_ROOT}${GROUPROOT}/$name";
+	if (!ZFSexists($path)) {
+	    system("$ZFS create -o quota=${ZFS_QUOTA_GROUP} $path");
+	    if ($?) {
+		fatal("Could not create ZFS $path");
+	    }
+	}
+    }
+
+    if (system("egrep -q -s '^${unix_name}:' /etc/group")) {
+	print "Adding group $unix_name ...\n";
+
+	if (system("$GROUPADD $unix_name -g $gid")) {
+	    fatal("Could not add group $unix_name ($gid)!\n");
+	}
+    }
+    return 0;
+}
+
+sub AddGroup()
+{
+    if (@ARGV != 3) {
+	fatal("addgroup: Wrong number of arguments");
+    }
+    my $name      = shift(@ARGV);
+    my $unix_name = shift(@ARGV);
+    my $gid       = shift(@ARGV);
+
+    if (system("egrep -q -s '^${unix_name}:' /etc/group")) {
+	print "Adding group $unix_name ...\n";
+
+	if (system("$GROUPADD $unix_name -g $gid")) {
+	    fatal("Could not add group $unix_name ($gid)!\n");
+	}
+    }
+    return 0;
+}
+
+sub DelProject()
+{
+    if (@ARGV != 2) {
+	fatal("delproject: Wrong number of arguments");
+    }
+    my $name       = shift(@ARGV);
+    my $unix_name  = shift(@ARGV);
+
+    if ($WITHZFS) {
+	my $path = "${ZFS_ROOT}${PROJROOT}/$name";
+	if (ZFSexists($path)) {
+	    system("$ZFS unmount -f $path");
+	    system("$ZFS destroy $path");
+	    if ($?) {
+		fatal("Could not destroy ZFS $path");
+	    }
+	}
+	$path = "${ZFS_ROOT}${GROUPROOT}/$name";
+	if (ZFSexists($path)) {
+	    system("$ZFS unmount -f $path");
+	    system("$ZFS destroy $path");
+	    if ($?) {
+		fatal("Could not destroy ZFS $path");
+	    }
+	}
+    }
+    if (system("egrep -q -s '^${unix_name}:' /etc/group") == 0) {
+	print "Deleting project $unix_name ...\n";
+
+	if (system("$GROUPDEL $unix_name")) {
+	    fatal("Could not delete group $unix_name!\n");
+	}
+    }
+    return 0;
+}
+
+sub DelGroup()
+{
+    if (@ARGV != 2) {
+	fatal("delgroup: Wrong number of arguments");
+    }
+    my $name      = shift(@ARGV);
+    my $unix_name = shift(@ARGV);
+
+    if (system("egrep -q -s '^${unix_name}:' /etc/group") == 0) {
+	print "Deleting group $unix_name ...\n";
+
+	if (system("$GROUPDEL $unix_name")) {
+	    fatal("Could not delete group $unix_name!\n");
+	}
+    }
+    return 0;
+}
+
+sub fatal($) {
+    my ($msg) = @_;
+
+    print STDERR "$msg\n";
+    exit(-1);
+}
+
+#
+# Check for ZFS existence.
+#
+sub ZFSexists($)
+{
+    my ($path) = @_;
+
+    system("$ZFS list $path >/dev/null 2>&1");
+    return ($? ? 0 : 1);
+}

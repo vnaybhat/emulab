@@ -1,0 +1,102 @@
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+
+SRCDIR		= @srcdir@
+TESTBED_SRCDIR	= @top_srcdir@
+OBJDIR		= ..
+SUBDIR		= apt
+
+include $(OBJDIR)/Makeconf
+
+SUBDIRS		= 
+
+BIN_SCRIPTS	= manage_profile manage_instance manage_dataset \
+                  create_instance rungenilib
+SBIN_SCRIPTS	=
+LIB_SCRIPTS     = APT_Profile.pm APT_Instance.pm APT_Dataset.pm APT_Geni.pm
+WEB_BIN_SCRIPTS = webmanage_profile webmanage_instance webmanage_dataset \
+                  webcreate_instance webrungenilib
+WEB_SBIN_SCRIPTS=
+LIBEXEC_SCRIPTS	= $(WEB_BIN_SCRIPTS) $(WEB_SBIN_SCRIPTS)
+USERLIBEXEC     = rungenilib.proxy
+
+# These scripts installed setuid, with sudo. 
+SETUID_BIN_SCRIPTS   = rungenilib
+SETUID_SBIN_SCRIPTS  = 
+SETUID_SUEXEC_SCRIPTS= 
+
+#
+# Force dependencies on the scripts so that they will be rerun through
+# configure if the .in file is changed.
+# 
+all:	$(BIN_SCRIPTS) $(SBIN_SCRIPTS) $(LIBEXEC_SCRIPTS) $(SUBDIRS) \
+	$(LIB_SCRIPTS) $(USERLIBEXEC) all-subdirs
+
+subboss: 
+
+include $(TESTBED_SRCDIR)/GNUmakerules
+
+install: $(addprefix $(INSTALL_BINDIR)/, $(BIN_SCRIPTS)) \
+	$(addprefix $(INSTALL_SBINDIR)/, $(SBIN_SCRIPTS)) \
+	$(addprefix $(INSTALL_LIBDIR)/, $(LIB_SCRIPTS)) \
+	$(addprefix $(INSTALL_LIBEXECDIR)/, $(LIBEXEC_SCRIPTS)) \
+	$(addprefix $(INSTALL_DIR)/opsdir/libexec/, $(USERLIBEXEC))
+
+
+boss-install: install install-subdirs
+
+subboss-install: 
+
+post-install: 
+
+#
+# Control node installation (aka, ops)
+#
+control-install:
+
+# This rule says what web* script depends on which installed binary directory.
+$(WEB_SBIN_SCRIPTS): $(INSTALL_SBINDIR)
+$(WEB_BIN_SCRIPTS):  $(INSTALL_BINDIR)
+
+# Just in case the dirs are not yet created,
+$(INSTALL_SBINDIR) $(INSTALL_BINDIR):
+
+# And then how to turn the template into the actual script. 
+$(WEB_SBIN_SCRIPTS) $(WEB_BIN_SCRIPTS): $(TESTBED_SRCDIR)/WEBtemplate.in
+	@echo "Generating $@"
+	cat $< | sed -e 's,@PROGTOINVOKE@,$(word 2,$^)/$(subst web,,$@),' > $@
+
+clean:	clean-subdirs
+
+# How to recursively descend into subdirectories to make general
+# targets such as `all'.
+%.MAKE:
+	@$(MAKE) -C $(dir $@) $(basename $(notdir $@))
+%-subdirs: $(addsuffix /%.MAKE,$(SUBDIRS)) ;
+
+$(INSTALL_DIR)/opsdir/libexec/%: %
+	@echo "Installing $<"
+	-mkdir -p $(INSTALL_DIR)/opsdir/libexec
+	$(INSTALL) $< $@
+
+.PHONY:	$(SUBDIRS) install

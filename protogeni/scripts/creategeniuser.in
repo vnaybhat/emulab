@@ -1,0 +1,224 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2008-2014 University of Utah and the Flux Group.
+# 
+# {{{GENIPUBLIC-LICENSE
+# 
+# GENI Public License
+# 
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and/or hardware specification (the "Work") to
+# deal in the Work without restriction, including without limitation the
+# rights to use, copy, modify, merge, publish, distribute, sublicense,
+# and/or sell copies of the Work, and to permit persons to whom the Work
+# is furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Work.
+# 
+# THE WORK IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+# OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+# MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
+# NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
+# HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
+# WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE WORK OR THE USE OR OTHER DEALINGS
+# IN THE WORK.
+# 
+# }}}
+#
+use strict;
+use English;
+use Getopt::Std;
+use Data::Dumper;
+
+#
+# Create a geni user. This is a nonlocal user, derived from the
+# only info we have which is the urn/email. We use this from CloudLab
+# web interface (geni-login) to create a stub local account for a
+# geni user. 
+#
+sub usage()
+{
+    print STDERR "Usage: $0 [-n] <urn> <email>\n";
+    exit(1);
+}
+my $optlist  = "nr";
+my $impotent = 0;
+my $delete   = 0;
+
+# Configure ...
+my $TB		  = "@prefix@";
+my $TBACCT	  = "$TB/sbin/tbacct";
+my $MKUSERCERT    = "$TB/sbin/mkusercert";
+my $MODGROUPS     = "$TB/sbin/modgroups";
+
+use lib '@prefix@/lib';
+use emutil;
+use User;
+use Project;
+use GeniCertificate;
+use GeniHRN;
+use EmulabConstants;
+
+# Protos.
+sub DeleteGeniUser($);
+
+sub fatal($)
+{
+    my ($msg) = @_;
+
+    die("*** $0:\n".
+	"    $msg\n");
+}
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"n"})) {
+    $impotent = 1;
+}
+if (defined($options{"r"})) {
+    usage()
+	if (@ARGV != 1);
+    $delete = 1;
+}
+else {
+    usage()
+	if (@ARGV != 2);
+}
+my $urn     = $ARGV[0];
+fatal("Invalid urn")
+    if (! GeniHRN::IsValid($urn));
+
+# Make sure we can get this project.
+my $project = Project->Lookup("CloudLab");
+if (!defined($project)) {
+    fatal("Cannot find the project.");
+}
+if ($delete) {
+    exit(DeleteGeniUser($urn));
+}
+
+my $email   = $ARGV[1];
+my $usr_uid;
+fatal("Invalid email")
+    if (! User->ValidEmail($email));
+
+# Must not be a user with same nonlocal ID.
+if (User->LookupNonLocal($urn)) {
+    fatal("We already have a user with that nonlocal ID (urn)");
+}
+
+#
+# Parse urn and email, maybe we can get a unique uid out of one.
+#
+my (undef,undef,$uid) = GeniHRN::Parse($urn);
+fatal("Could not parse urn")
+    if (!defined($uid));
+if (User->ValidUID($uid) && !User->Lookup($uid)) {
+    $usr_uid = $uid;
+}
+else {
+    #
+    # Split email and try that.
+    #
+    my ($token) = split("@", $email);
+    if (defined($token) &&
+	User->ValidUID($token) && !User->Lookup($token)) {
+	$usr_uid = $token;
+    }
+}
+#
+# Neither worked, so need to generate something. Ick.
+#
+if (!defined($usr_uid)) {
+    if (!User->ValidUID($uid)) {
+	# Random
+	$usr_uid = "g" . substr(lc(emutil::GenHash()), 0, 6);
+    }
+    else {
+	my $i;
+	$uid = substr($uid, 0, 7);
+	for ($i = 0 ; $i <= 9; $i++) {
+	    if (!User->Lookup("${uid}${i}")) {
+		$usr_uid = "${uid}${i}";
+		last;
+	    }
+	}
+	if ($i > 9) {
+	    $usr_uid = "g" . substr(lc(emutil::GenHash()), 0, 6);
+	}
+    }
+}
+if ($impotent) {
+    print "Would create nolocal user '$usr_uid' ...\n";
+    exit(0);
+}
+
+#
+# Okay, create new account in the DB.
+#
+my $user = User->Create($usr_uid,
+			$User::NEWUSER_FLAGS_NONLOCAL,
+			{"usr_name"      => "Geni User $usr_uid",
+			 "usr_email"     => $email,
+			 "nonlocal_id"   => $urn,
+			 "nonlocal_type" => "geni",
+			});
+fatal("Could not create user!")
+    if (!defined($user));
+
+#
+# Add them to the holding project. This will need more thought.
+#
+if ($project->AddMemberShip($user, $Group::MemberShip::TRUSTSTRING_LOCALROOT)) {
+    $user->Delete();
+    fatal("Could not add new user to project");
+}
+
+# And then instantiate the user.
+system("$TBACCT add $usr_uid");
+if ($?) {
+    $project->DeleteMemberShip($user);
+    $user->Delete();
+    fatal("Could not instantiate user account!")
+}
+
+# We need to generate the encrypted ssl certificate to keep
+# things happy.
+my $certpass = substr(lc(emutil::GenHash()), 0, 10);
+system("$MKUSERCERT -p $certpass $usr_uid");
+if ($?) {
+    $project->DeleteMemberShip($user);
+    $user->Delete();
+    fatal("Could not create local SSL certificate");
+}
+exit(0);
+
+#
+# Delete (purge!) geni user. Not to be used generally, please use
+# the normal archive path. This is for debugging.
+#
+sub DeleteGeniUser($)
+{
+    my ($urn) = @_;
+    my $user = User->LookupNonLocal($urn);
+    if (!defined($user)) {
+	fatal("No such local user!");
+    }
+    my $uid = $user->uid();
+    my $pid = $project->pid();
+    system("$MODGROUPS -r $pid:$pid $uid");
+
+    system("$TBACCT -f del $uid") == 0 or
+	fatal("$TBACCT $uid failed!");
+
+    $user->Delete();
+    return 0;
+}

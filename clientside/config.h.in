@@ -1,0 +1,9 @@
+/* config.h.in */
+
+/* For current automake/autoconf incompatibility. */
+#undef PACKAGE
+#undef VERSION
+
+#undef ELVIN_COMPAT
+#undef LOG_TESTBED
+#undef TPM

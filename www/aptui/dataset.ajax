@@ -1,0 +1,297 @@
+<?php
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+chdir("..");
+include_once("lease_defs.php");
+include_once("blockstore_defs.php");
+chdir("apt");
+include_once("dataset_defs.php");
+
+#
+# Server side of creating a dataset.
+#
+function Do_CreateDataSet()
+{
+    global $this_user;
+    global $ajax_args;
+    global $DBFieldErrstr, $TBDIR, $APTBASE, $embedded;
+    global $suexec_output, $suexec_output_array;
+
+    $this_idx   = $this_user->uid_idx();
+    $this_uid   = $this_user->uid();
+    # Allow for form precheck only. So JS code knows it will be fast. 
+    $checkonly  = isset($ajax_args["checkonly"]) && $ajax_args["checkonly"];
+
+    if (!isset($ajax_args["formfields"])) {
+	SPITAJAX_ERROR(1, "Missing formfields");
+	return;
+    }
+    $formfields = $ajax_args["formfields"];
+    $errors  = array();
+    if ($embedded) {
+	$command = "webcreatedataset ";
+    }
+    else {
+	$command = "webmanage_dataset create ";
+    }
+    $required = array("dataset_pid", "dataset_name", "dataset_type",
+		      "dataset_size", "dataset_fstype");
+
+    foreach ($required as $field) {
+	if (!isset($formfields[$field]) || $formfields[$field] == "") {
+	    $errors[$field] = "Missing field";
+	}
+    }
+    if (count($errors)) {
+	SPITAJAX_ERROR(2, $errors);
+	return;
+    }
+
+    if (!TBvalid_pid($formfields["dataset_pid"])) {
+	$errors["dataset_pid"] = $DBFieldErrstr;
+    }
+    $project = Project::LookupByPid($formfields["dataset_pid"]);
+    if (!$project) {
+	$errors["dataset_pid"] = "No such project";
+    }
+    elseif (!ISADMIN() &&
+	    (!$project->IsMember($this_user, $isapproved) || !$isapproved)) {
+	$errors["dataset_pid"] = "Not a project member";
+    }
+    $pid = $project->pid();
+    
+    if (!TBvalid_vnode_id($formfields["dataset_name"])) {
+	$errors["dataset_name"] = $DBFieldErrstr;
+    }
+    if (! ($formfields["dataset_type"] == "stdataset" ||
+	   $formfields["dataset_type"] == "ltdataset")) {
+	$errors["dataset_type"] = "Illegal value";
+    }
+    else {
+	$command .= " -t " . $formfields["dataset_type"];
+    }
+    if ($formfields["dataset_type"] == "stdataset") {
+	if (!isset($formfields["dataset_expires"]) ||
+	    $formfields["dataset_expires"] == "") {
+	    $errors["dataset_expires"] = "Missing field";
+	}
+	elseif (!strtotime($formfields["dataset_expires"])) {
+	    $errors["dataset_expires"] = "Illegal value";
+	}
+	else {
+	    $command .= " -e " .
+		escapeshellarg($formfields["dataset_expires"]);
+	}
+    }
+    if (! preg_match('/^(none|ext2|ext3|ext4|ufs|ufs2)$/',
+		     $formfields["dataset_fstype"])) {
+	$errors["dataset_fstype"] = "Illegal value";
+    }
+    elseif ($formfields["dataset_fstype"] != "none") {
+	$command .= " -f " . $formfields["dataset_fstype"];
+    }
+    if (! preg_match('/^\d+(MB|GB|TB)$/i',
+		     $formfields["dataset_size"])) {
+	$errors["dataset_size"] = "Illegal value";
+    }
+    else {
+	$command .= " -s " . $formfields["dataset_size"];
+    }
+    if (count($errors)) {
+	SPITAJAX_ERROR(2, $errors);
+	return;
+    }
+    if ($checkonly) {
+	SPITAJAX_RESPONSE(0);
+	return;
+    }
+    $command .= " " . escapeshellarg($pid . "/" .
+				     $formfields["dataset_name"]);
+
+    $retval = SUEXEC($this_uid, $pid, $command, SUEXEC_ACTION_CONTINUE);
+    if ($retval) {
+	SPITAJAX_ERROR(1, $suexec_output);
+	return;
+    }
+    if ($embedded) {
+	$dataset = Lease::LookupByName($project, $formfields["dataset_name"]);
+    }
+    else {
+	$dataset = Dataset::LookupByName($project, $formfields["dataset_name"]);
+    }
+    if (!$dataset) {
+	SPITAJAX_ERROR(-1, "Could not find lease after creation");
+	return 1;
+    }
+    $dataset_uuid = $dataset->uuid();
+    SPITAJAX_RESPONSE("$APTBASE/show-dataset.php?uuid=$dataset_uuid");
+}
+
+function Do_DeleteDataset()
+{
+    global $this_user;
+    global $ajax_args;
+    global $suexec_output, $suexec_output_array, $APTBASE;
+    
+    $this_idx = $this_user->uid_idx();
+    $this_uid = $this_user->uid();
+    $islease  = 1;
+
+    if (!isset($ajax_args["uuid"])) {
+	SPITAJAX_ERROR(1, "Missing uuid");
+	return;
+    }
+    #
+    # Either a local lease or a remote dataset. 
+    #
+    $dataset = Lease::Lookup($ajax_args["uuid"]);
+    if (!$dataset) {
+	$dataset = Dataset::Lookup($ajax_args["uuid"]);
+	$islease = 0;
+    }
+    if (!$dataset) {
+	SPITAJAX_ERROR(1, "Unknown dataset");
+	return;
+    }
+    if ($this_uid != $dataset->owner_uid() && !ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not enough permission");
+	return;
+    }
+    if ($islease) {
+	$command = "webdeletelease -f -b ";
+    }
+    else {
+	$command = "webmanage_dataset delete ";
+    }
+    $command .= $dataset->pid() . "/" . $dataset->id();
+    
+    #
+    # Invoke backend.
+    #
+    $retval = SUEXEC($this_uid, $dataset->pid(), $command,
+		     SUEXEC_ACTION_CONTINUE);
+    if ($retval != 0) {
+	$error = "Transient error; please try again later";
+	
+	if ($retval && count($suexec_output_array)) {
+	    $error = $suexec_output_array[0];
+	}
+	SPITAJAX_ERROR(1, $error);
+	return;
+    }
+    SPITAJAX_RESPONSE("$APTBASE");
+}
+
+function Do_ApproveDataset()
+{
+    global $this_user;
+    global $ajax_args;
+    global $suexec_output, $suexec_output_array, $APTBASE;
+    
+    $this_idx = $this_user->uid_idx();
+    $this_uid = $this_user->uid();
+
+    if (!isset($ajax_args["uuid"])) {
+	SPITAJAX_ERROR(1, "Missing uuid");
+	return;
+    }
+    $lease_uuid = $ajax_args["uuid"];
+    $lease = Lease::Lookup($lease_uuid);
+    if (!$lease) {
+	SPITAJAX_ERROR(1, "Unknown dataset");
+	return;
+    }
+    if (!ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not enough permission");
+	return;
+    }
+    if ($lease->state() != "unapproved") {
+	SPITAJAX_ERROR(1, "Dataset does not need to be approved.");
+	return;
+    }
+    #
+    # Invoke backend.
+    #
+    $retval = SUEXEC($this_uid, $lease->pid(),
+		     "webapprovelease " .
+		     $lease->pid() . "/" .
+		        $lease->gid() . "/" . $lease->lease_id(),
+		     SUEXEC_ACTION_CONTINUE);
+    if ($retval != 0) {
+	$error = "Transient error; please try again later";
+	
+	if ($retval && count($suexec_output_array)) {
+	    $error = $suexec_output;
+	}
+	SPITAJAX_ERROR(1, $error);
+	return;
+    }
+    SPITAJAX_RESPONSE("$APTBASE/show-dataset.php?uuid=$lease_uuid");
+}
+
+function Do_RefreshDataset()
+{
+    global $this_user;
+    global $ajax_args;
+    global $suexec_output, $suexec_output_array, $APTBASE;
+    
+    $this_idx = $this_user->uid_idx();
+    $this_uid = $this_user->uid();
+
+    if (!isset($ajax_args["uuid"])) {
+	SPITAJAX_ERROR(1, "Missing uuid");
+	return;
+    }
+    $uuid    = $ajax_args["uuid"];
+    $dataset = Dataset::Lookup($uuid);
+    if (!$dataset) {
+	SPITAJAX_ERROR(1, "Unknown dataset");
+	return;
+    }
+    if ($this_uid != $dataset->owner_uid() && !ISADMIN()) {
+	SPITAJAX_ERROR(1, "Not enough permission");
+	return;
+    }
+    #
+    # Invoke backend.
+    #
+    $retval = SUEXEC($this_uid, $dataset->pid(),
+		     "webmanage_dataset refresh " .
+		     $dataset->pid() . "/" . $dataset->id(),
+		     SUEXEC_ACTION_CONTINUE);
+    if ($retval != 0) {
+	$error = "Transient error; please try again later";
+	
+	if ($retval && count($suexec_output_array)) {
+	    $error = $suexec_output_array[0];
+	}
+	SPITAJAX_ERROR(1, $error);
+	return;
+    }
+    SPITAJAX_RESPONSE(0);
+}
+
+# Local Variables:
+# mode:php
+# End:
+?>

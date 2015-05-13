@@ -1,0 +1,68 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2000-2012 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LGPL
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software; you can redistribute it and/or modify it
+# under the terms of the GNU Lesser General Public License as published by
+# the Free Software Foundation; either version 2.1 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Lesser General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Lesser General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+# This now a frontend to run the proper version.
+#
+use English;
+use Getopt::Long;
+use strict;
+
+#
+# Configure variables
+#
+my $TB = '@prefix@';
+
+# This is all we need for a front end.
+use lib '@prefix@/lib';
+use User;
+use libtestbed;
+use EmulabFeatures;
+
+#
+# See if we use the alternate version of snmpit.
+#
+my $this_user;
+
+if ($UID) {
+    $this_user = User->ThisUser();
+    if (! defined($this_user)) {
+	die("*** $0:\n".
+	    "    You ($UID) do not exist!\n");
+    }
+}
+
+# Lets not bother (or worry) people.
+$EmulabFeatures::verbose = 0;
+
+if (EmulabFeatures->FeatureEnabled("OldSnmpit", $this_user, undef, undef)) {
+    my $newpath = "$TB/bin/snmpit_old";
+    print STDERR "Invoking alternate snmpit from $newpath\n";
+    exec $newpath, @ARGV;
+    die("*** $0:\n".
+	"    Could not exec $newpath: $!");
+}
+
+my $newpath = "$TB/bin/snmpit_test";
+exec $newpath, @ARGV;
+die("*** $0:\n".
+    "    Could not exec $newpath: $!");

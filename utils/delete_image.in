@@ -1,0 +1,307 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use English;
+use strict;
+use Getopt::Std;
+use File::Basename;
+use Data::Dumper;
+
+#
+# Delete an image (descriptor) 
+#
+sub usage()
+{
+    print("Usage: delete_image [-p | -r] <imagename>\n".
+	  "Options:\n".
+	  "       -p     Purge the disk image file(s)\n".
+	  "       -r     Rename the disk image file(s) instead\n".
+	  "       -n     Impotent mode, show what would be done.\n".
+	  "       -F     Force deletion of global system image\n");
+    exit(-1);
+}
+my $optlist     = "dFprn";
+my $debug       = 0;
+my $purge       = 0;
+my $rename      = 0;
+my $force       = 0;
+my $impotent    = 0;
+my $needunlock  = 0;
+
+#
+# Configure variables
+#
+my $TB             = "@prefix@";
+my $PROJROOT       = "@PROJROOT_DIR@";
+my $TBOPS          = "@TBOPSEMAIL@";
+my $friskiller     = "$TB/sbin/frisbeehelper";
+my $WITHPROVENANCE = @IMAGEPROVENANCE@;
+my $doprovenance   = 0;
+
+#
+# Untaint the path
+#
+$ENV{'PATH'} = "$TB/bin:$TB/sbin:/bin:/usr/bin:/usr/bin:/usr/sbin";
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# We don't want to run this script unless its the real version.
+#
+if ($EUID != 0) {
+    die("*** $0:\n".
+	"    Must be setuid! Maybe its a development version?\n");
+}
+
+#
+# Load the Testbed support stuff.
+#
+use lib "@prefix@/lib";
+use EmulabConstants;
+use EmulabFeatures;
+use libtestbed;
+use User;
+use Image;
+
+# Protos
+sub fatal($);
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"p"})) {
+    $purge = 1;
+}
+if (defined($options{"r"})) {
+    $rename = 1;
+}
+if (defined($options{"n"})) {
+    $impotent = 1;
+}
+if (defined($options{"F"})) {
+    $force = 1;
+}
+usage()
+    if (@ARGV != 1);
+usage()
+    if ($purge && $rename);
+
+my $imageid = shift(@ARGV);
+
+#
+# Map invoking user to object. 
+#
+my $this_user = User->ThisUser();
+if (! defined($this_user)) {
+    fatal("You ($UID) do not exist!");
+}
+my $image = Image->Lookup($imageid);
+if (!defined($image)) {
+    fatal("Image does not exist in the DB!");
+}
+if (!$image->AccessCheck($this_user, TB_IMAGEID_DESTROY())) {
+    fatal("You do not have permission to delete this image!");
+}
+
+if ($image->pid() eq TBOPSPID() && $image->global() && !$force) {
+    fatal("Refusing to delete global system image $image. ".
+	  "Use -F if you are sure.\n");
+}
+
+# See if enabled.
+if ($WITHPROVENANCE) {
+    $doprovenance = 
+	EmulabFeatures->FeatureEnabled("ImageProvenance", undef,
+				       $image->GetProject());
+}
+
+#
+# Before we do anything destructive, we lock the descriptor.
+#
+if (!$impotent) {
+    if ($image->Lock()) {
+	fatal("Image is locked, please try again later!\n");
+    }
+    $needunlock = 1;
+}
+$imageid      = $image->imageid();
+my $imagename = $image->imagename();
+my $imagepid  = $image->pid();
+
+#
+# Need root to delete the image file later.
+#
+$EUID = $UID;
+
+#
+# Be sure to kill off running frisbee. If a node is trying to load that
+# image, well tough. 
+#
+system("$friskiller -k $imageid");
+if ($?) {
+    fatal("Could not kill running frisbee for $imageid!");
+}
+
+#
+# When IMAGEPROVENANCE is on, we never delete system images, we
+# rename them. 
+#
+if ($image->pid() eq TBOPSPID()) {
+    if ($purge) {
+	$purge  = 0;
+	print STDERR "Ignoring purge option for system image. \n";
+    }
+    if ($WITHPROVENANCE) {
+	print STDERR "Turning on rename option for system image. \n";
+	$rename = 1;
+    }
+}
+
+#
+# Since admins will often delete image descriptors for users, we are
+# setuid root. Flip for deleting the image file.
+#
+if ($purge || $rename) {
+    #
+    # When doing image provenance, we have to deal with all versions
+    # of the image. 
+    #
+    my @images = ();
+    if ($image->AllVersions(\@images)) {
+	fatal("Could not get list of image (versions)");
+    }
+    foreach my $imageversion (@images) {
+	my @todelete = ();
+	my @torename = ();
+	my $filename = $imageversion->path();
+
+	push(@torename, $filename);
+	push(@todelete, "$filename.bak");
+	if ($filename =~ /^(.*)\.ndz$/) {
+	    push(@todelete, "$1.sha1");
+	} else {
+	    push(@todelete, "$filename.sha1");
+	}
+	push(@torename, "$filename.sig");
+	push(@todelete, "$filename.sig.bak");
+
+	# We throw away versions that never came ready or released.
+	if ($purge ||
+	    !($imageversion->ready() && $imageversion->released())) {
+	    @todelete = (@todelete, @torename);
+	    @torename = ();
+	}
+	# Throw away the slot if it never came ready or released.
+	if (!($imageversion->ready() && $imageversion->released())) {
+	    if ($impotent) {
+		my $vers = $imageversion->version();
+		print "Would kill version $vers that never came ready\n";
+		next;
+	    }
+	    $imageversion->DeleteVersion();
+	}
+
+	$EUID = 0;
+	foreach my $file (@todelete) {
+	    if (-e $file) {
+		if ($impotent) {
+		    print "Would delete $file\n";
+		    next;
+		}
+		if (! unlink($file)) {
+		    SENDMAIL($TBOPS,
+			     "delete_image: Could not remove image file",
+			     "Could not remove $file\n".
+			     "Someone will need to do this by hand.\n");
+		}
+	    }
+	}
+	#
+	# Delete with rename; move the current files out of the way
+	# so that they do not conflict with a later image of the same name.
+	# We do this by creating a subdir for the files.
+	#
+	if (@torename) {
+	    my $dirname = dirname($imageversion->path()) .
+		"/" . $image->imagename() . ":" . $image->imageid();
+
+	    if (! -e $dirname && !$impotent) {
+		if (! mkdir("$dirname", 0775)) {
+		    fatal("Could not mkdir $dirname");
+		}
+	    }
+	    foreach my $file (@torename) {
+		my $newname = $dirname . "/" . basename($file);
+		
+		if ($impotent) {
+		    print "Would rename $file to $newname\n" if (-e $file);
+		    next;
+		}
+		if (-e $file) {
+		    system("/bin/mv -fv $file $newname");
+		    if ($?) {
+			fatal("Could not rename $file to $dirname");
+		    }
+		}
+		if ($file eq $filename &&
+		    $imageversion->Update({"path" => $newname})) {
+		    fatal("Could not update path for $imageversion");
+		}
+	    }
+	}
+	$EUID = $UID;
+    }
+}
+exit(0)
+    if ($impotent);
+
+if ($image->Delete() != 0) {
+    fatal("Could not delete image!");
+}
+$this_user->SendEmail("delete_image: Image has been deleted",
+		      "Image $imagepid,$imagename ($imageid) has ".
+		      "been deleted by $this_user\n");
+exit(0);
+    
+sub fatal($)
+{
+    my ($mesg) = @_;
+
+    $image->Unlock()
+	if ($needunlock);
+
+    die("*** $0:\n".
+	"    $mesg\n");
+}

@@ -1,0 +1,39 @@
+<!-- This is the rspec text view modal -->
+<div id='rspec_modal' class='modal fade'>
+  <div class='modal-dialog'>
+    <div class='modal-content'>
+      <div class='modal-header'>
+	<div id='rspec_modal_editbuttons'>
+          <button type='button' class='btn btn-danger btn-xs pull-right'
+		  data-dismiss='modal'
+                  style='margin-right: 10px;'>
+            Cancel</button>
+          <button type='button' class='btn btn-primary btn-xs pull-right'
+                  style='margin-right: 10px;'
+                  id='collapse_rspec_modal_button'>
+            Accept</button>
+	</div>
+	<div id='rspec_modal_viewbuttons' class='hidden'>
+          <button type='button' class='btn btn-danger btn-xs pull-right'
+		  data-dismiss='modal'
+                  style='margin-right: 10px;'>
+            Close</button>
+	</div>
+        <h3>Source</h3>
+      </div>
+      <div class='modal-body'>
+        <div class='panel panel-default'>
+          <div class='panel-body'>
+	    <textarea name=\"formfields[profile_rspec_modal]\"
+		      id='modal_profile_rspec_textarea'
+		      rows=20
+                      class='form-control'
+                      type='textarea'></textarea>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+    

@@ -1,0 +1,656 @@
+diff -rcN tftp-hpa-0.48/MCONFIG.in emulab-tftp-hpa-0.48/MCONFIG.in
+*** tftp-hpa-0.48/MCONFIG.in	Tue Jan 30 16:51:05 2007
+--- emulab-tftp-hpa-0.48/MCONFIG.in	Fri Mar 16 10:24:18 2007
+***************
+*** 31,36 ****
+--- 31,43 ----
+  
+  # System binaries
+  SBINDIR = @sbindir@
++ LIBEXECDIR = @libexecdir@
++ 
++ # Config info
++ ETCDIR = @sysconfdir@
++ 
++ # Facility for logging
++ LOGFACIL = LOG_LOCAL5
+  
+  # Binary suffixes
+  O = @OBJEXT@
+***************
+*** 46,55 ****
+  INSTALL         = @INSTALL@
+  INSTALL_PROGRAM = @INSTALL_PROGRAM@
+  INSTALL_DATA    = @INSTALL_DATA@
+  
+  # Compiler and compiler flags
+  CC      = @CC@
+! CFLAGS  = @CFLAGS@ -I$(SRCROOT)
+  
+  # Link flags
+  LDFLAGS = @LDFLAGS@
+--- 53,63 ----
+  INSTALL         = @INSTALL@
+  INSTALL_PROGRAM = @INSTALL_PROGRAM@
+  INSTALL_DATA    = @INSTALL_DATA@
++ INSTALL_SCRIPT  = @INSTALL_SCRIPT@
+  
+  # Compiler and compiler flags
+  CC      = @CC@
+! CFLAGS  = @CFLAGS@ -I$(SRCROOT) -DLOGFACIL=$(LOGFACIL)
+  
+  # Link flags
+  LDFLAGS = @LDFLAGS@
+diff -rcN tftp-hpa-0.48/tftpd/Makefile emulab-tftp-hpa-0.48/tftpd/Makefile
+*** tftp-hpa-0.48/tftpd/Makefile	Tue Jan 30 16:51:05 2007
+--- emulab-tftp-hpa-0.48/tftpd/Makefile	Fri Mar 16 10:54:04 2007
+***************
+*** 17,26 ****
+  	sed -e 's/@@VERSION@@/$(VERSION)/g' < $< > $@
+  
+  install: all
+! 	mkdir -p $(INSTALLROOT)$(SBINDIR) $(INSTALLROOT)$(MANDIR)/man8
+! 	$(INSTALL_PROGRAM) tftpd$(X) $(INSTALLROOT)$(SBINDIR)/in.tftpd
+! 	$(INSTALL_DATA)    tftpd.8 $(INSTALLROOT)$(MANDIR)/man8/in.tftpd.8
+! 	cd $(INSTALLROOT)$(MANDIR)/man8 && $(LN_S) -f in.tftpd.8 tftpd.8
+  
+  clean:
+  	rm -f *.o *.obj *.exe tftpd tftpsubs.c tftpsubs.h tftpd.8
+--- 17,27 ----
+  	sed -e 's/@@VERSION@@/$(VERSION)/g' < $< > $@
+  
+  install: all
+! 	mkdir -p $(INSTALLROOT)$(LIBEXECDIR) $(INSTALLROOT)$(MANDIR)/man8
+! 	$(INSTALL_PROGRAM) tftpd$(X) $(INSTALLROOT)$(LIBEXECDIR)/tftpd
+! 	$(INSTALL_DATA)    tftpd.8 $(INSTALLROOT)$(MANDIR)/man8/tftpd.8
+! 	$(INSTALL_SCRIPT) -m 555 tftpd-hpa.sh $(INSTALLROOT)$(ETCDIR)/rc.d/
+! 	$(INSTALL_DATA)    tftpd.rules $(INSTALLROOT)$(ETCDIR)/
+  
+  clean:
+  	rm -f *.o *.obj *.exe tftpd tftpsubs.c tftpsubs.h tftpd.8
+diff -rcN tftp-hpa-0.48/tftpd/remap.c emulab-tftp-hpa-0.48/tftpd/remap.c
+*** tftp-hpa-0.48/tftpd/remap.c	Tue Jan 30 16:51:05 2007
+--- emulab-tftp-hpa-0.48/tftpd/remap.c	Fri Mar 16 10:31:00 2007
+***************
+*** 333,339 ****
+    /* Default error */
+    *errmsg = "Remap table failure";
+  
+!   if ( verbosity >= 3 ) {
+      syslog(LOG_INFO, "remap: input: %s", current);
+    }
+  
+--- 333,339 ----
+    /* Default error */
+    *errmsg = "Remap table failure";
+  
+!   if ( verbosity >= 5 ) {
+      syslog(LOG_INFO, "remap: input: %s", current);
+    }
+  
+***************
+*** 364,370 ****
+  	}
+  
+  	if ( ruleptr->rule_flags & RULE_ABORT ) {
+! 	  if ( verbosity >= 3 ) {
+  	    syslog(LOG_INFO, "remap: rule %d: abort: %s",
+  		   ruleptr->nrule, current);
+  	  }
+--- 364,370 ----
+  	}
+  
+  	if ( ruleptr->rule_flags & RULE_ABORT ) {
+! 	  if ( verbosity >= 5 ) {
+  	    syslog(LOG_INFO, "remap: rule %d: abort: %s",
+  		   ruleptr->nrule, current);
+  	  }
+***************
+*** 391,397 ****
+  			 pmatch, macrosub);
+  	  free(current);
+  	  current = newstr;
+! 	  if ( verbosity >= 3 ) {
+  	    syslog(LOG_INFO, "remap: rule %d: rewrite: %s",
+  		   ruleptr->nrule, current);
+  	  }
+--- 391,397 ----
+  			 pmatch, macrosub);
+  	  free(current);
+  	  current = newstr;
+! 	  if ( verbosity >= 5 ) {
+  	    syslog(LOG_INFO, "remap: rule %d: rewrite: %s",
+  		   ruleptr->nrule, current);
+  	  }
+***************
+*** 406,425 ****
+        was_match = 0;
+  
+        if ( ruleptr->rule_flags & RULE_EXIT ) {
+! 	if ( verbosity >= 3 ) {
+  	  syslog(LOG_INFO, "remap: rule %d: exit", ruleptr->nrule);
+  	}
+  	return current;		/* Exit here, we're done */
+        } else if ( ruleptr->rule_flags & RULE_RESTART ) {
+  	ruleptr = rules;	/* Start from the top */
+! 	if ( verbosity >= 3 ) {
+  	  syslog(LOG_INFO, "remap: rule %d: restart", ruleptr->nrule);
+  	}
+        }
+      }
+    }
+  
+!   if ( verbosity >= 3 ) {
+      syslog(LOG_INFO, "remap: done");
+    }
+    return current;
+--- 406,425 ----
+        was_match = 0;
+  
+        if ( ruleptr->rule_flags & RULE_EXIT ) {
+! 	if ( verbosity >= 5 ) {
+  	  syslog(LOG_INFO, "remap: rule %d: exit", ruleptr->nrule);
+  	}
+  	return current;		/* Exit here, we're done */
+        } else if ( ruleptr->rule_flags & RULE_RESTART ) {
+  	ruleptr = rules;	/* Start from the top */
+! 	if ( verbosity >= 5 ) {
+  	  syslog(LOG_INFO, "remap: rule %d: restart", ruleptr->nrule);
+  	}
+        }
+      }
+    }
+  
+!   if ( verbosity >= 5 ) {
+      syslog(LOG_INFO, "remap: done");
+    }
+    return current;
+diff -rcN tftp-hpa-0.48/tftpd/tftpd-hpa.sh emulab-tftp-hpa-0.48/tftpd/tftpd-hpa.sh
+*** tftp-hpa-0.48/tftpd/tftpd-hpa.sh	Wed Dec 31 17:00:00 1969
+--- emulab-tftp-hpa-0.48/tftpd/tftpd-hpa.sh	Fri Mar 16 10:31:52 2007
+***************
+*** 0 ****
+--- 1,43 ----
++ #!/bin/sh
++ #
++ 
++ if ! PREFIX=$(expr $0 : "\(/.*\)/etc/rc\.d/$(basename $0)\$"); then
++     echo "$0: Cannot determine the PREFIX" >&2
++     exit 1
++ fi
++ 
++ tftpd_flags="-l"
++ 
++ if [ -z "${source_rc_confs_defined}" ]; then
++ 	if [ -r /etc/defaults/rc.conf ]; then
++ 		. /etc/defaults/rc.conf
++ 		source_rc_confs
++ 	elif [ -r /etc/rc.conf ]; then
++ 		. /etc/rc.conf
++ 	fi
++ fi
++ 
++ if [ -r ${PREFIX}/etc/tftpd.rules ]; then
++ 	tftpd_flags="-m ${PREFIX}/etc/tftpd.rules $tftpd_flags"
++ fi
++ 
++ case "$1" in
++ start)
++ 	if [ -x ${PREFIX}/libexec/tftpd ]; then
++ 		echo -n ' tftpd'
++ 		if [ `grep -c -E '^tftp' /etc/inetd.conf` -ne 0 ]; then
++ 			echo ": enabled in inetd.conf, not starting daemon"
++ 		else
++ 			${PREFIX}/libexec/tftpd $tftpd_flags
++ 		fi
++ 	fi
++ 	;;
++ stop)
++ 	killall tftpd && echo -n ' tftpd'
++ 	;;
++ *)
++ 	echo "Usage: `basename $0` {start|stop}" >&2
++ 	;;
++ esac
++ 
++ exit 0
+diff -rcN tftp-hpa-0.48/tftpd/tftpd.c emulab-tftp-hpa-0.48/tftpd/tftpd.c
+*** tftp-hpa-0.48/tftpd/tftpd.c	Tue Jan 30 16:51:05 2007
+--- emulab-tftp-hpa-0.48/tftpd/tftpd.c	Mon Mar 19 12:32:16 2007
+***************
+*** 59,64 ****
+--- 59,65 ----
+  #include <pwd.h>
+  #include <limits.h>
+  #include <syslog.h>
++ #include <sys/wait.h>
+  
+  #include "common/tftpsubs.h"
+  #include "recvfrom.h"
+***************
+*** 88,93 ****
+--- 89,95 ----
+  unsigned long maxtimeout = TIMEOUT_LIMIT*TIMEOUT;
+  int           timeout_quit = 0;
+  sigjmp_buf    timeoutbuf;
++ u_short       block;
+  
+  #define	PKTSIZE	MAX_SEGSIZE+4
+  char		buf[PKTSIZE];
+***************
+*** 108,113 ****
+--- 110,117 ----
+  int		portrange = 0;
+  unsigned int	portrange_from, portrange_to;
+  int		verbosity = 0;
++ int		maxchildren = 0;
++ int		numchildren;
+  
+  struct formats;
+  #ifdef WITH_REGEX
+***************
+*** 153,160 ****
+  {
+    (void)sig;			/* Suppress unused warning */
+    timeout <<= 1;
+!   if (timeout >= maxtimeout || timeout_quit)
+      exit(0);
+    siglongjmp(timeoutbuf, 1);
+  }
+  
+--- 157,168 ----
+  {
+    (void)sig;			/* Suppress unused warning */
+    timeout <<= 1;
+!   if (timeout >= maxtimeout || timeout_quit) {
+!     if ( verbosity >= 3 && !timeout_quit )
+!       syslog(LOG_WARNING, "%s/%d: timeout on block %d\n",
+! 	     inet_ntoa(from.sin_addr), ntohs(from.sin_port), block);
+      exit(0);
++   }
+    siglongjmp(timeoutbuf, 1);
+  }
+  
+***************
+*** 271,276 ****
+--- 279,302 ----
+    }
+  }
+  
++ static void
++ reapchild(int sig)
++ {
++   pid_t pid;
++   int status;
++  
++   sig = SIGCHLD;
++ 
++   while ( 1 ) {
++     pid = waitpid(-1, &status, WNOHANG);
++     if ( pid <= 0 )
++       break;
++     numchildren--;
++     if ( verbosity >= 4 )
++       syslog(LOG_INFO, "pid %d exits, numchildren=%d",
++ 	     pid, numchildren);
++   }
++ }
+  
+  int
+  main(int argc, char **argv)
+***************
+*** 297,313 ****
+    char *rewrite_file = NULL;
+  #endif
+    u_short tp_opcode;
+  
+    /* basename() is way too much of a pain from a portability standpoint */
+  
+    p = strrchr(argv[0], '/');
+    __progname = (p && p[1]) ? p+1 : argv[0];
+    
+!   openlog(__progname, LOG_PID|LOG_NDELAY, LOG_DAEMON);
+  
+    srand(time(NULL) ^ getpid());
+    
+!   while ((c = getopt(argc, argv, "cspvVlLa:B:u:U:r:t:T:R:m:")) != -1)
+      switch (c) {
+      case 'c':
+        cancreate = 1;
+--- 323,340 ----
+    char *rewrite_file = NULL;
+  #endif
+    u_short tp_opcode;
++   sigset_t childmask, childunmask;
+  
+    /* basename() is way too much of a pain from a portability standpoint */
+  
+    p = strrchr(argv[0], '/');
+    __progname = (p && p[1]) ? p+1 : argv[0];
+    
+!   openlog(__progname, LOG_PID|LOG_NDELAY, LOGFACIL);
+  
+    srand(time(NULL) ^ getpid());
+    
+!   while ((c = getopt(argc, argv, "cC:spvVlLa:B:u:U:r:t:T:R:m:")) != -1)
+      switch (c) {
+      case 'c':
+        cancreate = 1;
+***************
+*** 404,409 ****
+--- 431,441 ----
+        printf("%s\n", TFTPD_CONFIG_STR);
+        exit(0);
+        break;
++     case 'C':
++       maxchildren = atoi(optarg);
++       if (maxchildren < 0)
++ 	maxchildren = 0;
++       break;
+      default:
+        usage();
+        break;
+***************
+*** 511,527 ****
+    } else {
+      /* 0 is our socket descriptor */
+      close(1); close(2);
+    }
+  
+    /* Disable path MTU discovery */
+    pmtu_discovery_off(0);
+  
+!   /* This means we don't want to wait() for children */
+  #ifdef SA_NOCLDWAIT
+!   set_signal(SIGCHLD, SIG_IGN, SA_NOCLDSTOP|SA_NOCLDWAIT);
+  #else
+!   set_signal(SIGCHLD, SIG_IGN, SA_NOCLDSTOP);
+  #endif
+  
+    /* Take SIGHUP and use it to set a variable.  This
+       is polled synchronously to make sure we don't
+--- 543,570 ----
+    } else {
+      /* 0 is our socket descriptor */
+      close(1); close(2);
++ 
++     /* child max only applies to standalone server */
++     maxchildren = 0;
+    }
+  
+    /* Disable path MTU discovery */
+    pmtu_discovery_off(0);
+  
+!   if ( maxchildren == 0 ) {
+!     /* This means we don't want to wait() for children */
+  #ifdef SA_NOCLDWAIT
+!     set_signal(SIGCHLD, SIG_IGN, SA_NOCLDSTOP|SA_NOCLDWAIT);
+  #else
+!     set_signal(SIGCHLD, SIG_IGN, SA_NOCLDSTOP);
+  #endif
++   } else {
++     set_signal(SIGCHLD, reapchild, SA_NOCLDSTOP);
++     sigemptyset(&childmask);
++     sigaddset(&childmask, SIGCHLD);
++     sigprocmask(SIG_BLOCK, &childmask, &childunmask);
++   }
++   numchildren = 0;
+  
+    /* Take SIGHUP and use it to set a variable.  This
+       is polled synchronously to make sure we don't
+***************
+*** 559,566 ****
+--- 602,616 ----
+      set_socket_nonblock(fd, 0);
+  #endif    
+  
++     if ( maxchildren )
++       sigprocmask(SIG_UNBLOCK, &childmask, 0);
++ 
+      /* Never time out if we're in standalone mode */
+      rv = select(fd+1, &readset, NULL, NULL, standalone ? NULL : &tv_waittime);
++ 
++     if ( maxchildren )
++       sigprocmask(SIG_BLOCK, &childmask, 0);
++ 
+      if ( rv == -1 && errno == EINTR )
+        continue;		/* Signal caught, reloop */
+      if ( rv == -1 ) {
+***************
+*** 599,604 ****
+--- 649,701 ----
+        memcpy(&myaddr.sin_addr, &bindaddr.sin_addr, sizeof bindaddr.sin_addr);
+      }
+  
++     if ( maxchildren ) {
++       if ( numchildren == maxchildren ) {
++ 	struct timeval t0, t1;
++ 	unsigned long dt;
++ 
++ 	gettimeofday(&t0, NULL);
++ 	if ( verbosity >= 4 )
++ 	  syslog(LOG_INFO, "no children, delaying request");
++ 	while ( numchildren == maxchildren )
++ 	  sigsuspend(&childunmask);
++ 	gettimeofday(&t1, NULL);
++ 	dt = (t1.tv_sec - t0.tv_sec)*1000000 + (t1.tv_usec - t0.tv_usec);
++ 	if ( verbosity >= 4 )
++ 	  syslog(LOG_INFO, "%s/%d: request delayed for %lu.%03lu seconds",
++ 		 inet_ntoa(from.sin_addr), ntohs(from.sin_port),
++ 		 dt / 1000000, (dt / 1000) % 1000);
++ 	/*
++ 	 * XXX if delayed too long, clients associated with many of the
++ 	 * requests in the queue have probably timed out and moved on.
++ 	 * We should not be firing up child processes to deal with these
++ 	 * requests, as they will just sit idle for TIMEOUT_LIMIT * timeout
++ 	 * seconds (63 seconds by default) waiting for a request that will
++ 	 * never come.  "too long" here is basically the minimal timeout
++ 	 * value of the client; we don't know that, so just use ours.
++ 	 * For now we just drop *any* pending requests.
++ 	 */
++ 	if (dt >= rexmtval) {
++ 	  int tossed = 1;
++ 	  while (1) {
++ 	    FD_ZERO(&readset);
++ 	    FD_SET(fd, &readset);
++ 	    tv_waittime.tv_sec = 0;
++ 	    tv_waittime.tv_usec = 0;
++ 	    if (select(fd+1, &readset, NULL, NULL, &tv_waittime) <= 0 ||
++ 		myrecvfrom(fd, buf, sizeof (buf), 0,
++ 			   (struct sockaddr *)&from, &fromlen, &myaddr) < 0)
++ 	      break;
++ 	    tossed++;
++ 	  }
++ 	  if ( verbosity >= 4 )
++ 	    syslog(LOG_INFO, "dropped %d requests due to excessive delay",
++ 		   tossed);
++ 	  continue;
++ 	}
++       }
++     }
++ 
+      /*
+       * Now that we have read the request packet from the UDP
+       * socket, we fork and go back to listening to the socket.
+***************
+*** 609,614 ****
+--- 706,713 ----
+        exit(EX_OSERR);	/* Return to inetd, just in case */
+      } else if ( pid == 0 )
+        break;			/* Child exit, parent loop */
++ 
++     numchildren++;
+    }
+    
+    /* Child process: handle the actual request here */
+***************
+*** 792,804 ****
+        }
+        if ( verbosity >= 1 ) {
+  	if ( filename == origfilename || !strcmp(filename, origfilename) )
+! 	  syslog(LOG_NOTICE, "%s from %s filename %s\n",
+! 		 tp_opcode == WRQ ? "WRQ" : "RRQ",
+! 		 inet_ntoa(from.sin_addr), filename);
+  	else
+! 	  syslog(LOG_NOTICE, "%s from %s filename %s remapped to %s\n",
+! 		 tp_opcode == WRQ ? "WRQ" : "RRQ",
+! 		 inet_ntoa(from.sin_addr), origfilename, filename);
+        }		   
+        ecode = (*pf->f_validate)(filename, tp_opcode, pf, &errmsgptr);
+        if (ecode) {
+--- 891,903 ----
+        }
+        if ( verbosity >= 1 ) {
+  	if ( filename == origfilename || !strcmp(filename, origfilename) )
+! 	  syslog(LOG_NOTICE, "%s/%d: %s for %s\n",
+! 		 inet_ntoa(from.sin_addr), ntohs(from.sin_port),
+! 		 tp_opcode == WRQ ? "WRQ" : "RRQ", filename);
+  	else
+! 	  syslog(LOG_NOTICE, "%s/%d: %s for %s (remapped to %s)\n",
+! 		 inet_ntoa(from.sin_addr), ntohs(from.sin_port),
+! 		 tp_opcode == WRQ ? "WRQ" : "RRQ", origfilename, filename);
+        }		   
+        ecode = (*pf->f_validate)(filename, tp_opcode, pf, &errmsgptr);
+        if (ecode) {
+***************
+*** 830,835 ****
+--- 929,941 ----
+      else
+        (*pf->f_send)(pf, NULL, 0);
+    }
++ 
++   if ( verbosity >= 3 ) {
++     syslog(LOG_NOTICE, "%s/%d: %s done\n",
++ 	   inet_ntoa(from.sin_addr), ntohs(from.sin_port),
++ 	   tp_opcode == WRQ ? "WRQ" : "RRQ");
++   }
++ 
+    exit(0);			/* Request completed */
+  }
+  
+***************
+*** 1127,1132 ****
+--- 1233,1240 ----
+    fd = open(filename, mode == RRQ ? rmode : wmode, 0666);
+    if (fd < 0) {
+      switch (errno) {
++     case EACCES:
++       return EACCESS;
+      case ENOENT:
+      case ENOTDIR:
+        return ENOTFOUND;
+***************
+*** 1188,1198 ****
+  {
+    struct tftphdr *dp;
+    struct tftphdr *ap;		/* ack packet */
+-   static u_short block = 1;	/* Static to avoid longjmp funnies */
+    u_short ap_opcode, ap_block;
+    unsigned long r_timeout;
+    int size, n;
+    
+    if (oap) {
+      timeout = rexmtval;
+      (void)sigsetjmp(timeoutbuf,1);
+--- 1296,1306 ----
+  {
+    struct tftphdr *dp;
+    struct tftphdr *ap;		/* ack packet */
+    u_short ap_opcode, ap_block;
+    unsigned long r_timeout;
+    int size, n;
+    
++   block = 1;
+    if (oap) {
+      timeout = rexmtval;
+      (void)sigsetjmp(timeoutbuf,1);
+***************
+*** 1296,1307 ****
+    int n, size;
+    /* These are "static" to avoid longjmp funnies */
+    static struct tftphdr *ap;    /* ack buffer */
+-   static u_short block = 0;
+    static int acksize;
+    u_short dp_opcode, dp_block;
+    unsigned long r_timeout;
+  
+    dp = w_init();
+    do {
+      timeout = rexmtval;
+      
+--- 1404,1415 ----
+    int n, size;
+    /* These are "static" to avoid longjmp funnies */
+    static struct tftphdr *ap;    /* ack buffer */
+    static int acksize;
+    u_short dp_opcode, dp_block;
+    unsigned long r_timeout;
+  
+    dp = w_init();
++   block = 0;
+    do {
+      timeout = rexmtval;
+      
+***************
+*** 1420,1427 ****
+    length += 4;			/* Add space for header */
+    
+    if ( verbosity >= 2 ) {
+!     syslog(LOG_INFO, "sending NAK (%d, %s) to %s",
+! 	   error, tp->th_msg, inet_ntoa(from.sin_addr));
+    }
+    
+    if (send(peer, buf, length, 0) != length)
+--- 1528,1536 ----
+    length += 4;			/* Add space for header */
+    
+    if ( verbosity >= 2 ) {
+!     syslog(LOG_INFO, "%s/%d: NAK (%d, %s) sent",
+! 	   inet_ntoa(from.sin_addr), ntohs(from.sin_port),
+! 	   error, tp->th_msg);
+    }
+    
+    if (send(peer, buf, length, 0) != length)
+diff -rcN tftp-hpa-0.48/tftpd/tftpd.rules emulab-tftp-hpa-0.48/tftpd/tftpd.rules
+*** tftp-hpa-0.48/tftpd/tftpd.rules	Wed Dec 31 17:00:00 1969
+--- emulab-tftp-hpa-0.48/tftpd/tftpd.rules	Fri Mar 16 10:50:11 2007
+***************
+*** 0 ****
+--- 1,37 ----
++ #
++ # Rules for chroot /tftpboot setup.  Just strip off the /tftpboot.
++ #
++ # This file has three fields: operation, regex, remapping
++ #
++ # The operation is a combination of the following letters:
++ #
++ # r - rewrite the matched string with the remapping pattern
++ # i - case-insensitive matching
++ # g - repeat until no match (used with "r")
++ # e - exit (with success) if we match this pattern, do not process
++ #     subsequent rules
++ # s - start over from the first rule if we match this pattern
++ # a - abort (refuse the request) if we match this rule
++ # G - this rule applies to TFTP GET requests only
++ # P - this rule applies to TFTP PUT requests only
++ #
++ # The regex is a regular expression in the style of egrep(1).
++ #
++ # The remapping is a pattern, all characters are verbatim except \
++ # \0 copies the full string that matched the regex
++ # \1..\9 copies the 9 first (..) expressions in the regex
++ # \\ is an escaped \
++ #
++ # "#" begins a comment, unless \-escaped
++ #
++ r	^/tftpboot			# Remove prefix since we chroot
++ #
++ # Additional Emulab rules to deal with Freebsd loader-based pxeboot
++ # which wants to look for "kernel" in about a zillion different places
++ # (ok, its only two...) when loading the MFS.  Since the kernel is only
++ # in one place, and the only reason the lookup on it would ever fail is
++ # due to network load, lets just map the alternatives back to the primary
++ # location, effectively forcing retries.
++ #
++ r       ^/(.*/boot)/kernel/(.*)$        /\1/\2
++ r       ^/(.*/boot)/modules/(.*)$       /\1/\2

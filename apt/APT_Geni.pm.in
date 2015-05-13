@@ -1,0 +1,174 @@
+#!/usr/bin/perl -wT
+#
+# Copyright (c) 2007-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+package APT_Geni;
+
+use strict;
+use English;
+use Data::Dumper;
+use Carp;
+use Exporter;
+use vars qw(@ISA @EXPORT $AUTOLOAD);
+
+@ISA    = "Exporter";
+@EXPORT = qw ( );
+
+# Must come after package declaration!
+use EmulabConstants;
+use emdb;
+use libtestbed;
+use GeniCertificate;
+use GeniCredential;
+
+# Configure variables
+my $TB		  = "@prefix@";
+my $MAINSITE      = @TBMAINSITE@;
+my $TBOPS         = "@TBOPSEMAIL@";
+my $SACERT	  = "$TB/etc/genisa.pem";
+
+#
+# Generate the credentials we need. 
+#
+sub GenCredentials($$;$)
+{
+    my ($target, $geniuser, $privs) = @_;
+    my ($speaksfor, $credential);
+
+    my $speaker_signer = $GeniCredential::LOCALSA_FLAG;
+    #
+    # Utah; Guest users use the apt CA, and so we must sign the speaksfor
+    # credential with the APT SA as well so that the target of the
+    # speaksfor credential is in the same namespace as the signer.
+    #
+    if (!$geniuser->IsLocal() && $MAINSITE) {
+	$speaker_signer = "/usr/testbed/etc/utah-apt.sa";
+    }
+
+    #
+    # The Utah SA is always the speaker, even if the user is a guest
+    # with the alternate CA.
+    #
+    my $sa_certificate = GeniCertificate->LoadFromFile($SACERT);
+    if (!defined($sa_certificate)) {
+	print STDERR "Could not load certificate from $SACERT\n";
+	goto bad;
+    }
+    my $sa_authority = GeniAuthority->Lookup($sa_certificate->urn());
+    if (!defined($sa_authority)) {
+	prnt STDERR "Could not load SA authority object\n";
+	goto bad;
+    }
+
+    #
+    # If a local user account, but a nonlocal id, then we should
+    # have a speaksfor credential stored, as well as a certificate
+    # for the user.
+    #
+    if ($geniuser->IsLocal() && $geniuser->emulab_user()->IsNonLocal()) {
+	my ($speaksfor_string, $certificate_string) =
+	    $geniuser->emulab_user()->GetStoredCredential();
+	if (! (defined($speaksfor_string) &&
+	       defined($certificate_string))) {
+	    print STDERR "No stored speaksfor/certificate for $geniuser\n";
+	    goto bad;
+	}
+	$speaksfor = GeniCredential->CreateFromSigned($speaksfor_string);
+	if (!defined($speaksfor)) {
+	    print STDERR "Could not create speaksfor credential\n";
+	    goto bad;
+	}
+	my $certificate =
+	    GeniCertificate->LoadFromString($certificate_string);
+	if (!defined($certificate)) {
+	    print STDERR "Could not load certificate from string\n";
+	    goto bad;
+	}
+	$credential = GeniCredential->Create($target, $certificate);
+    }
+    else {
+	$speaksfor = GeniCredential->Create($geniuser, $sa_authority);
+	if (!defined($speaksfor)) {
+	    print STDERR "Could not create speaksfor credential\n";
+	    goto bad;
+	}
+	$speaksfor->SetType("speaksfor");
+	if ($speaksfor->Sign($speaker_signer)) {
+	    print STDERR "Could not sign speaksfor credential\n";
+	    goto bad;
+	}
+	$credential = GeniCredential->Create($target, $geniuser);
+    }
+    if (!defined($credential)) {
+	print STDERR "Could not create credential for $target\n";
+	goto bad;
+    }
+    # Add optional privs.
+    if (defined($privs)) {
+	foreach my $priv (@{ $privs }) {
+	    $credential->AddCapability($priv, 0);
+	}
+    }
+    # And sign it.
+    if ($credential->Sign($GeniCredential::LOCALSA_FLAG) != 0) {
+	$credential->Delete();
+	print STDERR "Could not sign $target credential\n";
+	goto bad;
+    }
+    return ($credential, $speaksfor);
+  bad:
+    return ();
+}
+
+#
+# Return the authority object for a URN.
+#
+sub GetAuthority($)
+{
+    my ($urn) = @_;
+
+    my $cm_authority = GeniAuthority->Lookup($urn);
+    if (!defined($cm_authority)) {
+	$cm_authority = GeniAuthority->CreateFromRegistry("cm", $urn);
+	if (!defined($cm_authority)) {
+	    print STDERR "Could not load CM authority object\n";
+	    return undef;
+	}
+    }
+    return $cm_authority;
+}
+
+#
+# Load the context operate as; always the same for APT.
+#
+sub GeniContext()
+{
+    my $certificate = GeniCertificate->LoadFromFile($SACERT);
+    if (!defined($certificate)) {
+	print STDERR "Could not load certificate from $SACERT\n";
+	return undef;
+    }
+    return Genixmlrpc->Context($certificate);
+}
+
+# _Always_ make sure that this 1 is at the end of the file...
+1;

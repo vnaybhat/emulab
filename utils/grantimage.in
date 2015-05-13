@@ -1,0 +1,251 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2003-2012 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use strict;
+use English;
+use Getopt::Std;
+
+#
+# Grant and revoke permission to use specific images.
+#
+sub usage()
+{
+    print STDERR "Usage: grantimage [-r] [-w] [-x] ";
+    print STDERR "[-g <gid> | -u <uid> | -a] <imageid>\n";
+    print STDERR "       grantimage -l <imageid>\n";
+    print STDERR "	-h   This message\n";
+    print STDERR "	-l   List permissions\n";
+    print STDERR "	-w   Grant write permission; defaults to read only\n";
+    print STDERR "	-r   Revoke access instead of grant\n";
+    print STDERR "	-u   Grant access to a specific user\n";
+    print STDERR "	-g   Grant access to a specific group (project)\n";
+    print STDERR "	-a   Grant global read-only access\n";
+    print STDERR "	-x   Also grant access to protogeni users\n";
+    exit(-1);
+}
+my $optlist  = "hg:dnru:wlax";
+my $impotent = 0;
+my $debug    = 0;
+my $revoke   = 0;
+my $writable = 0;
+my $listonly = 0;
+my $global   = 0;
+my $protogeni= 0;
+my $gid;
+my $uid;
+my $target;
+
+# Protos
+sub fatal($);
+
+#
+# Please do not run as root. Hard to track what has happened.
+#
+if ($UID == 0) {
+    die("*** $0:\n".
+	"    Please do not run this as root!\n");
+}
+
+#
+# Configure variables
+#
+my $TB		 = "@prefix@";
+
+#
+# Testbed Support libraries
+#
+use lib "@prefix@/lib";
+use emdb;
+use EmulabConstants;
+use libtestbed;
+use Experiment;
+use Project;
+use Group;
+use User;
+use Image;
+use OSinfo;
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Untaint the path
+# 
+$ENV{'PATH'} = "/bin:/sbin:/usr/bin:";
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{h})) {
+    usage();
+}
+if (defined($options{l})) {
+    $listonly = 1;
+}
+if (defined($options{n})) {
+    $impotent = 1;
+}
+if (defined($options{a})) {
+    $global = 1;
+}
+if (defined($options{r})) {
+    $revoke = 1;
+}
+if (defined($options{d})) {
+    $debug = 1;
+}
+if (defined($options{w})) {
+    $writable = 1;
+}
+if (defined($options{x})) {
+    $protogeni = 1;
+}
+if (defined($options{g})) {
+    $gid = $options{g};
+}
+if (defined($options{u})) {
+    $uid = $options{u};
+}
+usage()
+    if (@ARGV != 1);
+usage()
+    if (! ($listonly || $global || defined($gid) || defined($uid)));
+
+my $imageid = $ARGV[0];
+
+#
+# Verify user.
+#
+my $this_user = User->ThisUser();
+if (! defined($this_user)) {
+    fatal("You ($UID) do not exist!");
+}
+
+if (defined($gid)) {
+    $target = Group->Lookup($gid);
+    if (!defined($target)) {
+	fatal("No such project or group $gid\n");
+    }
+}
+elsif (defined($uid)) {
+    $target = User->Lookup($uid);
+    if (!defined($target)) {
+	fatal("No such user $uid\n");
+    }
+}
+my $image = Image->Lookup($imageid);
+if (!defined($image)) {
+    fatal("No such image exists");
+}
+$imageid = $image->imageid();
+    
+# User must have permission.
+if (! $image->AccessCheck($this_user, TB_IMAGEID_EXPORT())) {
+    fatal("You do not have permission to change the external permissions");
+}
+
+if ($listonly) {
+    my $query_result =
+	DBQueryFatal("select * from image_permissions ".
+		     "where imageid='$imageid'");
+
+    while (my $row = $query_result->fetchrow_hashref()) {
+	my $perm_type = $row->{'permission_type'};
+	my $perm_id   = $row->{'permission_id'};
+	my $perm_idx  = $row->{'permission_idx'};
+	my $write     = $row->{'allow_write'};
+
+	print "$perm_type: $perm_id ($perm_idx) ";
+	print "writable" if ($write);
+	print "\n";
+    }
+    exit(0);
+}
+elsif ($global) {
+    my $val = ($revoke ? 0 : 1);
+    $image->Update({"global" => $val}) == 0
+	or fatal("Could not update global flag");
+    
+    if ($image->ezid()) {
+	my $osinfo = OSinfo->Lookup($image->imageid());
+	if (defined($osinfo)) {
+	    $osinfo->Update({"shared" => $val}) == 0
+		or fatal("Could not update shared flag");
+
+	    if ($protogeni) {
+		$osinfo->Update({"protogeni_export" => '1'}) == 0
+		    or fatal("Could not update protogeni flag");
+	    }
+	}
+	else {
+	    fatal("Could not lookup OSinfo for $image");
+	}
+    }
+}
+elsif ($revoke) {
+    $image->RevokeAccess($target) == 0
+	or fatal("Could not revoke permission for $target");
+
+    if ($image->ezid() && $protogeni) {
+	my $osinfo = OSinfo->Lookup($image->imageid());
+	if (defined($osinfo)) {
+	    $osinfo->Update({"protogeni_export" => '0'}) == 0
+		or fatal("Could not update protogeni flag");
+	}
+	else {
+	    fatal("Could not lookup OSinfo for $image");
+	}
+    }
+}
+else {
+    $image->GrantAccess($target, $writable) == 0
+	or fatal("Could not grant permission for $target");
+
+    if ($image->ezid() && $protogeni) {
+	my $osinfo = OSinfo->Lookup($image->imageid());
+	if (defined($osinfo)) {
+	    $osinfo->Update({"protogeni_export" => '1'}) == 0
+		or fatal("Could not update protogeni flag");
+	}
+	else {
+	    fatal("Could not lookup OSinfo for $image");
+	}
+    }
+}
+exit(0);
+
+sub fatal($)
+{
+    my ($mesg) = $_[0];
+
+    die("*** $0:\n".
+	"    $mesg\n");
+}
+

@@ -1,0 +1,214 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2004-2012 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use English;
+use Getopt::Std;
+
+sub usage()
+{
+    print "Usage: " .
+	scriptname() . " [-j vnodeid] boot|shutdown|reconfig|reset\n";
+    exit(1);
+}
+my $optlist = "j:";
+my $action  = "boot";
+
+# Turn off line buffering on output
+$| = 1;
+
+# Drag in path stuff so we can find emulab stuff.
+BEGIN { require "/etc/emulab/paths.pm"; import emulabpaths; }
+
+# Only root.
+if ($EUID != 0) {
+    die("*** $0:\n".
+	"    Must be root to run this script!\n");
+}
+
+#
+# Load the OS independent support library. It will load the OS dependent
+# library and initialize itself. 
+# 
+use libsetup;
+use libtmcc;
+use librc;
+
+#
+# Not all clients support this.
+#
+exit(0)
+    if (PLAB() || JAILED() || CONTROL() || FSNODE());
+
+# Protos.
+sub doboot();
+sub doshutdown();
+sub doreconfig();
+sub docleanup();
+
+# Parse command line.
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{'j'})) {
+    my $vnodeid = $options{'j'};
+    libsetup_setvnodeid($vnodeid);
+}
+# Allow default above.
+if (@ARGV) {
+    $action = $ARGV[0];
+}
+
+# Execute the action.
+SWITCH: for ($action) {
+    /^boot$/i && do {
+	doboot();
+	last SWITCH;
+    };
+    /^shutdown$/i && do {
+	doshutdown();
+	last SWITCH;
+    };
+    /^reconfig$/i && do {
+	doreconfig();
+	last SWITCH;
+    };
+    /^reset$/i && do {
+	docleanup();
+	last SWITCH;
+    };
+    fatal("Invalid action: $action\n");
+}
+exit(0);
+
+# More protos
+sub donodeid();
+sub docreator();
+
+#
+# Boot Action.
+#
+sub doboot()
+{
+    my @tmccresults;
+    my @pubkeys     = ();
+
+    print STDOUT "Checking Testbed localization configuration ... \n";
+
+    if (tmcc(TMCCCMD_LOCALIZATION, undef, \@tmccresults) < 0) {
+	fatal("Could not get localization info from server!");
+    }
+    # Important; if no results then do nothing. 
+    return 0
+	if (! @tmccresults);
+
+    #
+    # Go through and see what we got. For now, we expect just ssh keys
+    # 
+    foreach my $str (@tmccresults) {
+	if ($str =~ /^ROOTPUBKEY='(.*)'$/) {
+	    push(@pubkeys, $1);
+	}
+	else {
+	    warning("Bad localization line: $str");
+	}
+    }
+
+    #
+    # Write new pubkeys to root authkeys file. As a safety mechanism, back
+    # up old authkeys to authkeys2 file, which is also used by openssh sshd. 
+    #
+    if (@pubkeys) {
+	my $authdir   = (WINDOWS() ? "/sshkeys/root" : "/root/.ssh");
+	my $authkeys  = $authdir . "/authorized_keys";
+	my $authkeys2 = $authkeys . "2";
+	my $authkeysnew = $authkeys . ".new";
+	my $oldumask  = umask(022);
+
+	#
+	# On FreeNAS, aka a storage host, root is RO so the best we
+	# can do is compare what we would write as authorized_keys to
+	# what is already present and complain if they don't match.
+	#
+	if (STORAGEHOST()) {
+	    $authkeysnew = "/tmp/authorized_keys.new";
+	} else {
+	    if (! -e $authdir) {
+		system("mkdir -p $authdir") == 0
+		    or fatal("Could not create $authdir");
+		system("chmod 700 $authdir") == 0
+		    or fatal("Failed to chmod $authdir");
+	    }
+
+	    if (-e "$authkeys") {
+		system("cp -pf $authkeys $authkeys2") == 0
+		    or fatal("Could not backup root ssh authorized_keys file");
+	    }
+	}
+
+	if (!open(AUTHKEYS, "> $authkeysnew")) {
+	    warning("Could not open $authkeysnew: $!");
+	    umask($oldumask);
+	    return -1;
+	}
+	umask($oldumask);
+	print AUTHKEYS "#\n";
+	print AUTHKEYS "# DO NOT EDIT! This file auto generated at bootup.\n";
+	print AUTHKEYS "#\n";
+    
+	foreach my $key (@pubkeys) {
+	    print AUTHKEYS "$key\n";
+	}
+	close(AUTHKEYS);
+
+	if (system("cmp -s $authkeysnew $authkeys") &&
+	    system("mv -f $authkeysnew $authkeys")) {
+	    warning("Could not mv $authkeysnew to $authkeys");
+	}
+	return 0;
+    }
+}
+
+#
+# Shutdown Action.
+#
+sub doshutdown()
+{
+    # Nothing to do
+}
+
+#
+# Node Reconfig Action (without rebooting).
+#
+sub doreconfig()
+{
+    doshutdown();
+    return doboot();
+}
+
+#
+# Node cleanup action (node is reset to completely clean state).
+#
+sub docleanup()
+{
+}
+

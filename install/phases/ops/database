@@ -1,0 +1,95 @@
+#
+# The template
+#
+use strict;
+use libinstall;
+use installvars;
+
+sub Install($$$)
+{
+    my ($server, $isupdate, $impotent) = @_;
+
+    # Replace if this script does an update for ip/domain.
+    return 0
+	if ($isupdate);
+
+    Phase "database", "Setting up database", sub {
+	PhaseSkip("mysqld not supported on ops")
+	    if ($FBSD_MAJOR == 4);
+	
+	# Get a password for the the DB.
+	Phase "password", "Asking for mysqld root password", sub {
+	    DoneIfExists("$ETCDIR/mysqld.pwd");
+
+	    if (!defined($password)) {
+		print "\n\nPick a password for mysqld (warning, will be echoed): ";
+		$password = <STDIN>;
+		chomp($password)
+		    if (defined($password));
+	    }
+	    PhaseFail("Invalid password supplied")
+		if (!defined($password) || $password eq "");
+	    
+	    CreateFileFatal("$ETCDIR/mysqld.pwd", "$password");
+	    ExecQuietFatal("$CHMOD 750 $ETCDIR/mysqld.pwd");
+	    ExecQuietFatal("$CHGRP tbadmin $ETCDIR/mysqld.pwd");
+	};
+	$password = `cat $ETCDIR/mysqld.pwd`;
+	chomp($password);
+	$password = EscapeShellArg($password);
+
+	Phase "initialize", "Initializing mysql", sub {
+	    PhaseSkip("mysqld already initialzed")
+		if (-d "$MYSQLDBDIR/mysql");
+
+	    ExecQuietFatal("$MYSQLINSTALL --ldata=${MYSQLDBDIR}");
+	    ExecQuietFatal("$CHOWN -R mysql:mysql $MYSQLDBDIR");
+	};
+	
+	Phase "start", "Starting mysqld", sub {
+	    my ($exitval) = ExecQuiet("$MYSQLADMIN -u mysql ping");
+
+	    PhaseSkip("mysqld already running")
+		if ($exitval == 0);
+
+	    ExecQuietFatal("$RCDIR/1.mysql-server.sh start");
+	    # Give mysqld some time to start, then make sure it did
+	    sleep 5;
+	    if (ExecQuiet("$MYSQLADMIN -u mysql ping")) {
+		sleep 10;
+		ExecQuietFatal("$MYSQLADMIN -u mysql ping");
+	    }
+	};
+
+	# Once the password is inserted and privs flushed, will need a password
+	# from this point forward!
+	Phase "privs", "Initializing mysqld priv system", sub {
+	    my ($exitval, @rows) =
+		ExecQuiet("echo 'select * from user limit 1' | ".
+			  "$MYSQL -s -u root mysql");
+	    if ($exitval) {
+		PhaseSkip("Privs already initialized");
+	    }
+	    ($exitval, @rows) =
+		ExecQuietFatal("echo \"update user set ".
+			       " Password=PASSWORD($password) ".
+			       "where user='root'; flush privileges\" | ".
+			       "$MYSQL -s -u root mysql");
+	};
+
+	Phase "dbpatch", "Patching up mysql DB", sub {
+	    if (!ExecQuiet("$MYSQLDUMP -u root -p$password mysql emulab_dbs")) {
+		PhaseSkip("DB already patched");
+	    }
+
+	    ExecQuietFatal("$MYSQL -u root -p$password mysql ".
+			   "  < $TOP_SRCDIR/sql/opsdb.sql");
+	};
+    };
+
+    return 0;
+}
+
+# Local Variables:
+# mode:perl
+# End:

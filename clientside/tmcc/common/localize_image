@@ -1,0 +1,165 @@
+#!/bin/sh
+#
+# Copyright (c) 2000-2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+
+if [ -r /etc/emulab/paths.sh ]; then
+	. /etc/emulab/paths.sh
+else
+	BINDIR=/etc/testbed
+	BOOTDIR=/var/emulab/boot
+	ETCDIR=/etc/emulab
+fi
+
+MNT="/mnt"
+
+case $# in
+1)
+	MNT=$1
+	;;
+*)
+	echo "Usage: $0 mountpoint"
+	exit 1
+esac
+
+#
+# Localize the image. We only do this if the MFS we are running in
+# has the necessary files. 
+#
+localize_image() {
+    # Check the certs.
+    if [ ! -d $MNT/etc/emulab ]; then
+	mkdir -m 755 $MNT/etc/emulab || {
+	    echo "Failed to mkdir $MNT/etc/emulab"
+	    return 1
+	}
+    fi
+    if [ -e $ETCDIR/emulab.pem ]; then
+	cmp -s $ETCDIR/emulab.pem $MNT/etc/emulab/emulab.pem
+	if [ $? -ne 0 ]; then
+	    echo "  updating $MNT/etc/emulab/emulab.pem"
+	    cp -p $ETCDIR/emulab.pem $MNT/etc/emulab/ || {
+		echo "Failed to create $ETCDIR/emulab.pem"
+		return 1
+	    }
+	fi
+    fi
+    if [ -e $ETCDIR/client.pem ]; then
+	cmp -s $ETCDIR/client.pem $MNT/etc/emulab/client.pem
+	if [ $? -ne 0 ]; then
+	    echo "  updating $MNT/etc/emulab/client.pem"
+	    cp -p $ETCDIR/client.pem $MNT/etc/emulab/ || {
+		echo "Failed to create $ETCDIR/client.pem"
+		return 1
+	    }
+	fi
+    fi
+    # Check the root keys.
+    if [ -e /root/.ssh/authorized_keys2 ]; then
+	cmp -s /root/.ssh/authorized_keys2 $MNT/root/.ssh/authorized_keys
+	if [ $? -ne 0 ]; then
+	    echo "  updating /root/.ssh/authorized_keys"
+	    
+	    if [ ! -d $MNT/root/.ssh ]; then
+		mkdir -m 700 $MNT/root/.ssh || {
+		    echo "Failed to mkdir /root/.ssh"
+		    return 1
+		}
+	    fi
+	    # copy to both authorized_keys and _keys2
+	    cp -p /root/.ssh/authorized_keys2 $MNT/root/.ssh/authorized_keys || {
+		echo "Failed to create /root/.ssh/authorized_keys"
+		return 1
+	    }
+	    cp -p /root/.ssh/authorized_keys2 $MNT/root/.ssh/ || {
+		echo "Failed to create /root/.ssh/authorized_keys2"
+		return 1
+	    }
+	fi
+    fi
+
+    # Check the host keys.
+    changehostkeys=0
+    if [ -e /etc/ssh/ssh_host_key ]; then
+	cmp -s /etc/ssh/ssh_host_key $MNT/etc/ssh/ssh_host_key
+	if [ $? -ne 0 ]; then
+	    changehostkeys=1
+	fi
+    fi
+    if [ -e /etc/ssh/ssh_host_rsa_key ]; then
+	cmp -s /etc/ssh/ssh_host_rsa_key $MNT/etc/ssh/ssh_host_rsa_key
+	if [ $? -ne 0 ]; then
+	    changehostkeys=1
+	fi
+    fi
+    if [ -e /etc/ssh/ssh_host_dsa_key ]; then
+	cmp -s /etc/ssh/ssh_host_dsa_key $MNT/etc/ssh/ssh_host_dsa_key
+	if [ $? -ne 0 ]; then
+	    changehostkeys=1
+	fi
+    fi
+    if [ $changehostkeys -eq 1 ]; then
+	echo "  updating /etc/ssh/hostkeys"
+	
+	if [ ! -d $MNT/etc/ssh ]; then
+	    mkdir -m 755 $MNT/etc/ssh || {
+		echo "Failed to mkdir $MNT/etc/ssh"
+		return 1
+	    }
+	fi
+	cp -p /etc/ssh/ssh_host_* $MNT/etc/ssh/ || {
+	    echo "Failed to create /etc/ssh/hostkeys"
+	    return 1
+	}
+    fi
+
+    # Check the time zone.
+    if [ -e /etc/localtime ]; then
+	cmp -s /etc/localtime $MNT/etc/localtime
+	if [ $? -ne 0 ]; then
+	    echo "  updating /etc/localtime"
+
+	    cp -p /etc/localtime $MNT/etc/localtime || {
+		echo "Failed to create /etc/localtime"
+		return 1
+	    }
+	fi
+    fi
+
+    # Check the NTP configuration.
+    if [ -e /etc/ntp.conf ]; then
+	cmp -s /etc/ntp.conf $MNT/etc/ntp.conf
+	if [ $? -ne 0 ]; then
+	    echo "  updating /etc/ntp.conf"
+
+	    cp -p /etc/ntp.conf $MNT/etc/ntp.conf || {
+		echo "Failed to create /etc/ntp.conf"
+		return 1
+	    }
+	fi
+    fi
+
+    return 0
+}
+
+localize_image
+exit $?

@@ -1,0 +1,558 @@
+#!/usr/bin/perl -w
+#
+# Copyright (c) 2014 University of Utah and the Flux Group.
+# 
+# {{{EMULAB-LICENSE
+# 
+# This file is part of the Emulab network testbed software.
+# 
+# This file is free software: you can redistribute it and/or modify it
+# under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or (at
+# your option) any later version.
+# 
+# This file is distributed in the hope that it will be useful, but WITHOUT
+# ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+# FITNESS FOR A PARTICULAR PURPOSE.  See the GNU Affero General Public
+# License for more details.
+# 
+# You should have received a copy of the GNU Affero General Public License
+# along with this file.  If not, see <http://www.gnu.org/licenses/>.
+# 
+# }}}
+#
+use English;
+use strict;
+use Getopt::Std;
+use Data::Dumper;
+use File::stat;
+
+#
+# Validate information for an image in the DB.
+# Currently we validate:
+#
+#  * that image file exists
+#  * that file mtime matches DB update time
+#  * file size is correct
+#  * SHA1 hash is correct
+#  * covered sector range is correct
+#
+# The update option will fix all but the first.
+#
+sub usage()
+{
+    print("Usage: imagevalidate [-dfupqR] [-H hash] [-V str] <imageid> ...\n" .
+	  "       imagevalidate [-dfupqR] [-H hash] [-V str] -a\n" .
+	  "Options:\n".
+	  "       -d      Turn on debug mode\n".
+	  "       -f      Only update if DB says an image is out of date\n".
+	  "       -u      Update incorrect or missing info in the DB\n".
+	  "       -p      Show current information from the DB\n".
+	  "       -q      Update quietly, no messages about mismatches\n".
+	  "       -R      Set the relocatable flag if image file has relocations\n".
+	  "       -a      Update all images\n".
+	  "       -P pid  Update all images for a specific pid\n".
+	  "       -U      Do not modify updater_uid in DB\n".
+	  "       -H hash Use the provided hash rather than recalculating\n".
+	  "       -V str  Comma separated list of fields to validate/update\n".
+	  "               valid values: 'hash', 'range', 'size', 'all'\n".
+	  "               default is 'all'\n");
+    exit(-1);
+}
+my $optlist    = "dfnupqRaP:UH:V:F";
+my $debug      = 0;
+my $showinfo   = 0;
+my $update     = 0;
+my $fastupdate = 0;
+my $setreloc   = 0;
+my $quiet      = 0;
+my $doall      = 0;
+my $doallpid;
+my $nouser     = 0;
+my %validate   = ();
+my @images     = ();
+my $userperm   = TB_IMAGEID_READINFO();
+my $newhash;
+
+#
+# Configure variables
+#
+my $TB		= "@prefix@";
+my $SHA1	= "/sbin/sha1";
+my $IMAGEINFO	= "$TB/sbin/imageinfo";
+
+# Protos
+sub doimage($);
+sub makehashfile($$$);
+sub removehashfile($);
+sub fatal($);
+
+#
+# Untaint the path
+#
+$ENV{'PATH'} = "$TB/bin:$TB/sbin:/bin:/usr/bin:/usr/bin:/usr/sbin";
+delete @ENV{'IFS', 'CDPATH', 'ENV', 'BASH_ENV'};
+
+#
+# Turn off line buffering on output
+#
+$| = 1;
+
+#
+# Load the Testbed support stuff.
+#
+use lib "@prefix@/lib";
+use EmulabConstants;
+use Image;
+use OSinfo;
+use User;
+use Project;
+
+#
+# Parse command arguments. Once we return from getopts, all that should be
+# left are the required arguments.
+#
+my %options = ();
+if (! getopts($optlist, \%options)) {
+    usage();
+}
+if (defined($options{"d"})) {
+    $debug = 1;
+}
+if (defined($options{"f"})) {
+    $fastupdate = 1;
+}
+if (defined($options{"u"})) {
+    $update = 1;
+    $userperm = TB_IMAGEID_MODIFYINFO();
+}
+if (defined($options{"p"})) {
+    $showinfo = 1;
+}
+if (defined($options{"q"})) {
+    $quiet = 1;
+}
+if (defined($options{"R"})) {
+    fatal("Do not use -R; image relocations are NOT a reliable indicator!");
+    #$setreloc = 1;
+}
+if (defined($options{"a"})) {
+    $doall = 1;
+}
+if (defined($options{"P"})) {
+    if ($options{"P"} =~ /^([-\w]+)$/) {
+	$doallpid = $1;
+	$doall = 1;
+    } else {
+	fatal("Invalid project name for -P");
+    }
+}
+if (defined($options{"U"})) {
+    $nouser = 1;
+}
+if (defined($options{"H"})) {
+    if ($options{"H"} =~ /^([\da-fA-F]+)$/) {
+	$newhash = lc($1);
+    } else {
+	fatal("Invalid hash string");
+    }
+}
+if (defined($options{"V"})) {
+    foreach my $f (split(',', $options{"V"})) {
+	$validate{$f} = 1;
+    }
+} else {
+    $validate{"all"} = 1;
+}
+@images = @ARGV;
+
+my $fixit = 0;
+if (defined($options{"F"})) {
+    $fixit = 1;
+}
+
+my ($user,$user_uid);
+if ($UID) {
+    $user = User->ThisUser();
+    if (!defined($user)) {
+	fatal("You ($UID) do not exist!");
+    }
+    $user_uid = $user->uid();
+}
+
+if ($nouser && $UID && !$user->IsAdmin()) {
+    fatal("Only admin can use -U");
+}
+
+if ($doall) {
+    if ($UID && !$user->IsAdmin()) {
+	fatal("Only admin can use -a");
+    }
+    if ($doallpid) {
+	if (!Project->Lookup($doallpid)) {
+	    fatal("No such project '$doallpid'");
+	}
+    }
+    @images = Image->ListAll("ndz", $doallpid);
+    if (@images > 100 && $validate{"hash"}) {
+	print STDERR "WARNING: processing ", int(@images),
+	" images, will take a LONG time!\n";
+    }
+}
+
+if (!$doall && @images == 0) {
+    usage();
+}
+if (defined($newhash) && @images > 1) {
+    fatal("-H option can only be used with a single image");
+}
+
+my $errs = 0;
+foreach my $pidimage (@images) {
+    $errs += doimage($pidimage);
+}
+exit($errs);
+
+sub doimage($)
+{
+    my ($pidimage) = @_;
+
+    my $image = Image->Lookup($pidimage);
+    if (!defined($image)) {
+	print STDERR "$pidimage: no such image\n";
+	return 1;
+    }
+    my $imageid = $image->imageid();
+
+    # If the user is not an admin, must have perm on the image.
+    if ($UID && !$user->IsAdmin() && !$image->AccessCheck($user, $userperm)) {
+	print STDERR "$pidimage: insufficient privilege\n";
+	return 1;
+    }
+
+    my $path = $image->path();
+    $path = ""
+	if (!defined($path));
+
+    my $hash = $image->hash();
+    $hash = ""
+	if (!defined($hash));
+
+    my $size = $image->size();
+    my $lbalo = $image->lba_low();
+    my $lbahi = $image->lba_high();
+    my $lbasize = $image->lba_size();
+    my $relocatable = $image->relocatable();
+    my $stamp;
+    $image->GetUpdate(\$stamp);
+    $stamp = 0
+	if (!defined($stamp));
+
+    if ($showinfo) {
+	print "$pidimage: path: $path\n";
+	print "$pidimage: mtime: $stamp\n";
+	if ($validate{"all"} || $validate{"size"}) {
+	    my $chunks = int(($size + (1024*1024-1)) / (1024*1024));
+	    print "$pidimage: size: $size ($chunks chunks)\n";
+	}
+	if ($validate{"all"} || $validate{"hash"}) {
+	    print "$pidimage: hash: $hash\n";
+	}
+	# XXX do sector range
+	if ($validate{"all"} || $validate{"range"}) {
+	    print "$pidimage: range: [$lbalo-$lbahi] (ssize: $lbasize), ".
+		  "relocatable=$relocatable\n";
+	}
+
+	return 0;
+    }
+
+    #
+    # The image file has to exist for us to check hash or sector range.
+    #
+    if (!$path) {
+	print STDERR "$pidimage: path: NULL image path\n";
+	return 1;
+    }
+    if (! -r "$path") {
+	print STDERR "$pidimage: path: image path '$path' cannot be read\n";
+	# if root and cannot read it, it doesn't exist so get rid of .sha1 file too
+	if ($UID == 0 && ($update || $fixit)) {
+	    removehashfile($path);
+	}
+	return 1;
+    }
+    my $mtime = stat($path)->mtime;
+    my $fsize = stat($path)->size;
+    my $fuid = stat($path)->uid;
+    if (!defined($mtime) || !defined($fsize) || !defined($fuid)) {
+	print STDERR "$pidimage: path: cannot stat '$path'\n";
+	return 1;
+    }
+
+    if ($fixit) {
+	print "$pidimage: fixing hash file\n";
+	if ($hash eq "") {
+	    $hash = `$SHA1 $path`;
+	    if ($?) {
+		print("$pidimage: hash: could not generate SHA1 hash of '$path'\n");
+		return 1;
+	    } else {
+		if ($hash =~ /^SHA1.*= ([\da-fA-F]+)$/) {
+		    $hash = lc($1);
+		} else {
+		    print("$pidimage: hash: could not parse sha1 hash: '$hash'\n");
+		    return 1;
+		}
+	    }
+	    if ($image->SetHash($hash) != 0) {
+		print("$pidimage: hash: could not store new hash: '$hash'\n");
+		return 1;
+	    }
+	}
+	makehashfile($path, $hash, $fuid);
+	return 0;
+    }
+
+    my $rv = 0;
+    my $changed = 0;
+
+    #
+    # Check/fix mtime.
+    #
+    if ($stamp == $mtime) {
+	if ($fastupdate) {
+	    print STDERR "$pidimage: skipping due to time stamp\n"
+		if ($debug);
+	    return 0;
+	}
+    } else {
+	print("$pidimage: mtime: DB timestamp ($stamp) != mtime ($mtime)\n")
+	    if (!$update || !$quiet);
+	if ($update) {
+	    $changed = 1;
+	}
+    }
+
+    #
+    # Check/fix file size.
+    #
+    if ($validate{"all"} || $validate{"size"}) {
+	if ($fsize != $size) {
+	    print("$pidimage: size: DB size ($size) != file size ($fsize)\n")
+		if (!$update || !$quiet);
+	    if ($update) {
+		print("$pidimage: size: ")
+		    if (!$quiet);
+		if ($image->SetSize($fsize) == 0) {
+		    $changed = 1;
+		    print "[FIXED]\n"
+			if (!$quiet);
+		} else {
+		    print "[FAILED]\n"
+			if (!$quiet);
+		    $rv = 1;
+		}
+	    } else {
+		$rv = 1;
+	    }
+	}
+    }
+
+    #
+    # Check/fix hash.
+    #
+    if ($validate{"all"} || $validate{"hash"}) {
+	my $filehash = $newhash;
+	if (!defined($filehash)) {
+	    $filehash = `$SHA1 $path`;
+	    if ($?) {
+		print("$pidimage: hash: could not generate SHA1 hash of '$path'\n");
+		$filehash = "";
+		$rv = 1;
+	    } else {
+		if ($filehash =~ /^SHA1.*= ([\da-fA-F]+)$/) {
+		    $filehash = lc($1);
+		} else {
+		    print("$pidimage: hash: could not parse sha1 hash: '$filehash'\n");
+		    $filehash = "";
+		}
+	    }
+
+	    if ($filehash && ($hash ne $filehash)) {
+		print("$pidimage: hash: DB hash ('$hash') != file hash ('$filehash')\n")
+		    if (!$update || !$quiet);
+		if ($update) {
+		    print("$pidimage: hash: ")
+			if (!$quiet);
+		    if ($image->SetHash($filehash) == 0) {
+			makehashfile($path, $filehash, $fuid);
+			$changed = 1;
+			print "[FIXED]\n"
+			    if (!$quiet);
+		    } else {
+			print "[FAILED]\n"
+			    if (!$quiet);
+			$rv = 1;
+		    }
+		} else {
+		    $rv = 1;
+		}
+	    } elsif ($filehash) {
+		# even if the DB is correct, make sure .sha1 file is correct
+		if ($update) {
+		    makehashfile($path, $filehash, $fuid);
+		}
+	    }
+	}
+    }
+
+    #
+    # Check/fix sector range.
+    #
+    if ($validate{"all"} || $validate{"range"}) {
+	my ($lo,$hi,$ssize) = (-1,0,0);
+	my $isreloc = $relocatable;
+	my $out = `imageinfo -r $pidimage 2>&1`;
+	if ($?) {
+	    print("$pidimage: range: could not get sector range:\n$out");
+	} else {
+	    if ($out =~ /minsect=(\d+).*maxsect=(\d+).*secsize=(\d+)/s) {
+		$lo = $1;
+		$hi = $2;
+		$ssize = $3;
+		#
+		# The sector range is actually relative to the slice
+		# (partition) number that imagezip was told to save.
+		# Thus a zero offset is actually the start sector of the
+		# partition and we compensate for that before recording
+		# the values in the DB.
+		#
+		my $off = $image->GetDiskOffset();
+		if ($off > 0) {
+		    $lo += $off;
+		    $hi += $off;
+		}
+		#
+		# XXX this is unreliable since we also generate a relocation
+		# for images that do not have a full final sector. Hence, we
+		# have disabled this.
+		#
+		# XXX the relocatable value returned by imageinfo is only a
+		# heuristic. It says only that relocations exist in the image.
+		# It is possible for a relocatable image to not actually
+		# have any imagezip relocations. Hence we only change the
+		# DB relocatable value from 0 -> 1 if explicitly asked and
+		# there are relocations in the image file.
+		#
+		#if ($setreloc && $relocatable == 0 &&
+		#    $out =~ /relocatable=1/s) {
+		#    $isreloc = 1;
+		#}
+	    } else {
+		print("$pidimage: range: could not parse imageinfo output:\n$out");
+	    }
+
+	    if ($lo >= 0 &&
+		($lo != $lbalo || $hi != $lbahi || $ssize != $lbasize ||
+		 $isreloc != $relocatable)) {
+		print("$pidimage: range: DB range ([$lbalo-$lbahi]/$lbasize) != file range ([$lo-$hi]/$ssize)\n")
+		    if (!$update || !$quiet);
+		if ($update) {
+		    print("$pidimage: range: ")
+			if (!$quiet);
+		    if ($image->SetRange($lo, $hi, $ssize, $isreloc) == 0) {
+			$changed = 1;
+			print "[FIXED]\n"
+			    if (!$quiet);
+		    } else {
+			print "[FAILED]\n"
+			    if (!$quiet);
+			$rv = 1;
+		    }
+		} else {
+		    $rv = 1;
+		}
+	    }
+	}
+    }
+
+    #
+    # Set update time to match mtime of image
+    #
+    if ($changed) {
+	print("$pidimage: mtime: ")
+	    if (!$quiet);
+
+	my $uuser = ($nouser ? undef : $user);
+	# XXX if running as root and no current user, set to image creator
+	if ($UID == 0 && !defined($image->updater())) {
+	    $uuser = User->LookupByUid($image->creator());
+	}
+
+	if ($image->MarkUpdate($uuser, $mtime) == 0) {
+	    print "[FIXED]\n"
+		if (!$quiet);
+	} else {
+	    print "[FAILED]\n"
+		if (!$quiet);
+	    $rv = 1;
+	}
+    }
+
+    return $rv;
+}
+
+sub partoffset($$)
+{
+    my ($part,$mbroff) = @_;
+}
+
+sub makehashfile($$$)
+{
+    my ($imagepath,$hash,$fuid) = @_;
+
+    my $hashfile;
+    if ($imagepath =~ /(.*)\.ndz$/) {
+	$hashfile = "$1.sha1";
+    } else {
+	$hashfile = "$imagepath.sha1";
+    }
+
+    unlink($hashfile);
+    if (open(HASH, ">$hashfile")) {
+	# XXX recreate the sha1 output format for compatibility
+	print HASH "SHA1 ($imagepath) = $hash\n";
+	close($hashfile);
+	if (defined($fuid)) {
+	    system("chown $fuid $hashfile");
+	}
+	system("touch -r $imagepath $hashfile");
+    }
+}
+
+sub removehashfile($)
+{
+    my ($imagepath) = @_;
+
+    my $hashfile;
+    if ($imagepath =~ /(.*)\.ndz$/) {
+	$hashfile = "$1.sha1";
+	if (-r "$hashfile") {
+	    unlink($hashfile);
+	}
+    }
+    $hashfile = "$imagepath.sha1";
+    if (-r "$hashfile") {
+	unlink($hashfile);
+    }
+}
+
+sub fatal($)
+{
+    my ($mesg) = @_;
+
+    print STDERR "*** $0:\n".
+	         "    $mesg\n";
+    exit(-1);
+}
