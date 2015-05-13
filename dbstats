@@ -1,0 +1,114 @@
+#!/usr/bin/env perl
+
+use strict;
+use Getopt::Std;
+use Sys::Hostname;
+use Time::ParseDate;
+
+use lib '/usr/testbed/lib';
+use libdb;		# for SQL access to DBQuery()/DBQueryFatal()
+
+use User;
+use Project;
+
+sub ask_db {
+    my($s, $e) = @_;
+    my($c1, $c2a, $c2b, $q, $qres, $ar);
+
+    #
+    # jam all the cases into the query and we'll patch up the results later
+    #
+    $c1  = "(swapout_time != 0 and swapin_time < $e and swapout_time >= $s)";
+    $c2a = "(swapout_time = 0 and swapmod_time = 0 and swapin_time < $e)";
+    $c2b = "(swapout_time = 0 and swapmod_time != 0 " .
+            "and swapin_time < $e and swapmod_time >= $s)";
+
+    $q = "SELECT r.swapin_time,r.swapout_time,r.swapmod_time,r.pnodes," .
+                "s.exptidx,s.pid,s.pid_idx,s.eid,s.creator,s.creator_idx " .
+         "FROM experiment_resources as r " .
+         "LEFT JOIN experiment_stats as s on r.exptidx=s.exptidx " .
+         "WHERE swapin_time != 0 and ($c1 or $c2a or $c2b) " .
+         "ORDER BY swapin_time;";
+
+    $qres = DBQuery($q);
+    return(undef) unless (defined($qres));
+
+    return($qres->fetchall_arrayref());
+}
+
+#
+# findend(aref,now): find the ending time of an experiment
+#
+sub findend {
+    my($ar, $now) = @_;
+    return($$ar[1]) if ($$ar[1] > 0);    # case 1:  have swapout time
+    return($now) unless ($$ar[2] > 0);   # case 2a: still running
+    return($$ar[2]);                     # case 2b: have mod time
+}
+
+#
+# ltimestr(time,short): local time string
+#
+sub ltimestr {
+    my($time, $short) = @_;
+
+    return(timestr($short, localtime($time)));
+}
+
+#
+# timestr(short,time...): time string
+#
+sub timestr {
+    my($short, @tar) = @_;
+
+    if ($short) {
+        return(sprintf("%02d/%02d-%02d:%02d", $tar[4] + 1, 
+                       $tar[3], $tar[2], $tar[1]));
+    }
+
+    sprintf("%04d/%02d/%02d-%02d:%02d:%02d", $tar[5] + 1900,
+        $tar[4] + 1, $tar[3], $tar[2], $tar[1], $tar[0]);
+}
+
+#
+# compute_usage: compute all usage info and save in state info for later
+#
+sub compute_usage {
+    my($s, $e, $db, $sa) = @_;
+    my($event, $slotstart, $slotend, $delta, $k);
+    my(%namemap, %byproj, %byuser, %bysize, %pidxtopid);
+
+    foreach $event (@$db) {
+        my($swapin,$swapout,$swapmod,$pnodes,$exptidx,$pid,$pid_idx,
+           $eid,$creator,$creator_idx) = @$event;
+
+        $slotstart = ($swapin > $s) ? $swapin : $s;
+        $slotend = findend($event, $e);
+        $slotend = $e if ($slotend > $e);
+        $delta = $slotend - $slotstart;
+        $delta = 0 if ($delta < 0);    # to be safe
+
+        # pid/creator may not be unique (if reused?) -- use idx
+        $namemap{$pid_idx} = $pid if (!defined($namemap{$pid_idx}));
+        $k = $creator_idx . "." . $pid_idx;
+        $namemap{$k} = $creator . "." . $pid if (!defined($namemap{$k}));
+
+        $byproj{$pid_idx} += ($delta * $pnodes);
+        $byuser{$k} += ($delta * $pnodes);
+        # skip 0 allocation if pnodes == 0
+        $bysize{$pnodes} += ($delta * $pnodes) unless ($pnodes == 0);
+
+		if($swapout == 0 && $swapmod == 0) {
+            $pidxtopid{$pid_idx} =  $pid . "." . $eid;
+		}
+    }
+
+    $$sa{'u_namemap'} = \%namemap;
+    $$sa{'u_proj'} = \%byproj;
+    $$sa{'u_user'} = \%byuser;
+    $$sa{'u_size'} = \%bysize;
+    $$sa{'pids'} = \%pidxtopid;
+}
+
+1;
+

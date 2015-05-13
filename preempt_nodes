@@ -1,0 +1,259 @@
+#!/usr/bin/env perl
+
+use strict;
+
+use Getopt::Std;
+use Sys::Hostname;
+use Time::ParseDate;
+
+use lib '/usr/testbed/lib';
+use libdb;		# for SQL access to DBQuery()/DBQueryFatal()
+
+use User;
+use Project;
+
+require "/usr/testbed/local/dbstats";
+
+sub freeable_node_count_projs($);
+sub get_proj_quota($);
+sub preempt_projs($$$$);
+
+my $TB      = "/usr/testbed";
+my $EXP     = "$TB/expwork";
+my $SBIN    = "$TB/sbin";
+my $BIN     = "$TB/bin";
+
+my $QUOTA_FILE = "$TB/proj_quota";
+my $maxquota = 100;
+
+sub allocd_but_free_nodes() {
+	my %state;
+
+    my $prend = parsedate("now");
+	my $prstart = $prend - (30 * 24 * 60 * 60);
+
+    my $dbq = ask_db($prstart, $prend);
+    &compute_usage($prstart, $prend, $dbq, \%state);
+
+    my $proj = $state{'u_proj'};
+    my $freeable_nodes = freeable_node_count_projs(\%{$proj});
+   
+    return $freeable_nodes;
+}
+
+sub get_proj_quota($) {
+	my $input_proj = shift;
+    my($line, $qf, @words);
+
+    open($qf, '<', $QUOTA_FILE) or return $maxquota;
+	
+    while($line = <$qf>)  {  
+        @words = split(/ /, $line);
+        if(($words[0]) && ($words[0] eq $input_proj)) {
+			return $words[1];
+		}
+	}
+
+    close $qf;
+	return $maxquota;
+}
+
+sub freeable_node_count_projs($) {
+    my $projs = shift;
+
+	my($freeable_nodes, $usghrs, $q, $eid, $pid, $result, $result1, $prj_quota);
+
+    $freeable_nodes = 0;
+	$usghrs = 0;
+
+    foreach my $pidxs (keys %{$projs}) {
+		$usghrs = $$projs{$pidxs} / (60 * 60);
+		$q = "SELECT distinct pid FROM experiments " .
+		     " WHERE pid_idx = $pidxs AND state = 'active' ".
+		     " AND pid not like 'emulab-ops'";
+        $result = DBQueryFatal($q);
+		$pid = $result->fetchrow_array;
+		next unless $pid;
+
+		$prj_quota = get_proj_quota($pid);
+
+		if($usghrs < $prj_quota) {
+			next;
+		}
+
+		$q = "SELECT eid, pid FROM experiments " .
+		     " WHERE pid_idx = $pidxs AND state = 'active' ".
+			 " AND pid not like 'emulab-ops'";
+		$result = DBQueryFatal($q);
+
+        while (($eid, $pid) = $result->fetchrow_array) {
+            $q = "SELECT count(node_id) FROM v2pmap " .
+			     " WHERE pid = '" . $pid . "' AND eid = '" . $eid . "'";
+		    $result1 = DBQueryFatal($q);
+            $freeable_nodes = $freeable_nodes + $result1->fetchrow_array;
+		}
+    }
+
+	return $freeable_nodes;
+}
+
+
+sub preempt_projs($$$$) {
+    # Arguments
+	my($num_nodes, $new_pid, $new_eid, $dry_run) = @_;
+
+    my ($dump_file, $fname, $fpath);
+    if($dry_run == 1) {
+        # Open the file to dump 'dry-run' results
+	    $fname = "$new_eid" . "-dryrun";
+	    $fpath = "$EXP" . "/" . "$new_pid" . "/" . "$fname";
+        open($dump_file, '>', $fpath);
+	}
+
+    # Calculate the range, currently 'rolling 30-days'
+    my $prend = parsedate("now");
+	my $prstart = $prend - (30 * 24 * 60 * 60);
+
+    # Get statistics and compute resource usage
+    my $dbq = ask_db($prstart, $prend);
+
+    # Variable to hold computed usage state
+	my %state;
+    &compute_usage($prstart, $prend, $dbq, \%state);
+
+    #
+    # Grab resource usage by project 
+    # The current policy is 'quotas-per-project'
+    # This could be simply changed by grabbing a different metric here
+    #
+    my $proj = $state{'u_proj'};
+
+    # variables to hold query and its results
+	my($query, $qresult1, $qresult2, $freenodes, $usghrs, $quota, $pidxs);
+
+    # If the current project has already exceeded its quota, return
+    $query = " SELECT distinct pid_idx FROM experiments " .
+	         "  WHERE pid = '$new_pid' AND eid = '$new_eid'";
+    $qresult1 = DBQueryFatal($query);
+    $pidxs    = $qresult1->fetchrow_array;
+	if(defined $pidxs) {
+		$usghrs   = 0;
+        $usghrs   = $$proj{$pidxs} / (60 * 60) if defined $$proj{$pidxs};
+	    $quota    = get_proj_quota($new_pid);
+
+	    if($usghrs >= $quota) {
+            if($dry_run == 1) {
+                print $dump_file "Usage hours for $new_pid = $usghrs\n";
+				print $dump_file "Quota for $new_pid = $quota";
+				print $dump_file "Project $new_pid exceeds its quota\n";
+			    close $dump_file;
+		    }
+		    return;
+	    }
+    }
+
+    # Num of freeable nodes based on 'project-pnode-hours-usage' policy
+    my $freeable_nodes = freeable_node_count_projs(\%{$proj});
+
+    # Number of currently free nodes
+    $query = "SELECT count(*) FROM nodes WHERE allocstate = 'FREE_DIRTY'";
+	$qresult1 = DBQueryFatal($query);
+    $freenodes = $qresult1->fetchrow_array;
+  
+    # If freeable + free nodes < requested num_nodes, return immediately
+    if(($freenodes + $freeable_nodes) < $num_nodes) {
+		if($dry_run == 1) {
+            # Dump stats before proceeding (for a dry-run)
+		    print $dump_file "Free Nodes = $freenodes. Spot Nodes = $freeable_nodes\n";
+            print $dump_file "Not enough free nodes or spot nodes available\n";    
+		    close $dump_file;
+		}
+
+        return;
+    }
+
+    #
+	# Sort based on 'proj-pnode-usage'. Probably needs some more thought.
+    # How about 'proj-pnode-usage exceeding quota'?
+    # 
+    my @keys = sort { $$proj{$b} <=> $$proj{$a} } keys %{$proj};
+
+    # Some more variable declaration
+    my($eid, $pid, $teid, $tpid, $nodes, $node_id, $prj_quota);
+    $nodes = "";
+
+    for $pidxs (@keys) {
+        # Extract the project usage hours
+		$usghrs = $$proj{$pidxs} / (60 * 60);
+
+        # fetch 'pid' for this 'pid_idx'
+		$query = "SELECT distinct pid FROM experiments " .
+		         " WHERE pid_idx = $pidxs AND state = 'active' ".
+		         " AND pid not like 'emulab-ops'";
+        $qresult1 = DBQueryFatal($query);
+		$pid = $qresult1->fetchrow_array;
+        next unless $pid;
+
+        # Get the assigned project quota for this 'pid'
+		$prj_quota = get_proj_quota($pid);
+
+        # Skip if usage is within quota
+		if($usghrs < $prj_quota) {
+			next;
+		}
+
+	    if($dry_run == 1) {
+            print $dump_file "Project $pid found to be exceeding quota\n";
+            print $dump_file "Project $pid: Usage Hours=$usghrs. Quota=$prj_quota\n";
+        }
+
+        # Fetch experiments in this 'pid' to be pre-empted
+		$query = "SELECT eid, pid FROM experiments " .
+		         " WHERE pid_idx = $pidxs AND state = 'active' ".
+			     " AND pid not like 'emulab-ops'";
+		$qresult1 = DBQueryFatal($query);
+
+        while (($eid, $pid) = $qresult1->fetchrow_array) {
+            # Fetch all nodes assigned to this project
+            $query = "SELECT node_id FROM v2pmap " .
+			         " WHERE pid = '" . $pid . "' AND eid = '" . $eid . "'";
+		    $qresult2 = DBQueryFatal($query);
+            $nodes = "";
+
+			while(($node_id) = $qresult2->fetchrow_array) {
+                $nodes = $nodes . " " . $node_id;
+				$freenodes = $freenodes + 1;
+		        if($freenodes >= $num_nodes) {
+                    last;
+		        }
+			}
+
+            if($dry_run == 1) {
+			    # Dump stats for dry-run    
+		        print $dump_file "Experiment $eid in project $pid will be swapped out\n";
+                print $dump_file "$nodes will be reserved for experiment $new_eid in project $new_pid\n";
+	            print $dump_file "$nodes will be freed from experiment $eid in project $pid\n";
+		    }
+		    else {
+                # Preempt experiments
+                system("$SBIN/sched_reserve $new_pid $new_eid $nodes > /dev/null");
+                system("$BIN/nfree -x $pid $eid -a > /dev/null");
+                system("$BIN/swapexp -s out $pid $eid > /dev/null");
+		    }
+
+		    if($freenodes >= $num_nodes) {
+                last;
+		    }
+		}
+
+		if($freenodes >= $num_nodes) {
+            last;
+		}
+    }
+ 
+    if($dry_run == 1) {
+        close $dump_file;
+	}
+}
+
+1;
