@@ -52,6 +52,9 @@ Modified Files:
     proceed
 (4) sched_reserve: Removed the requirement that only admins can reserve the 
     nodes (might need some careful thought and review)
+(5) nfree: Removed the check for user's permission to free nodes
+(6) swapexp: Removed the check for user's permission to muck expt. Still
+    this is not complete and does not solve the bug #1 noted below.
 
 Quota File:
 (1) proj_quota: A flat text file, should be placed under /usr/testbed
@@ -59,6 +62,17 @@ Quota File:
 	<quota> is in pnode-hours (for rolling 30 days)
 	A entry containing a default value should be placed
     Ex: "default 500" means a system wide default quota of 500 pnode-hours
+===============================================================================
+
+Open Issues and bugs:
+(1) If the incoming experiment and the 'pre-empted' expt belong to projects
+    owned by different users, then the 'pre-empted' expt will continue to 
+    remain as a zombie. This does not happen when both projects are owned by
+    the same user.
+    A possible cause could be the permission checks happening in "swapexp out"
+    This is called from preempt_projs. I have removed a few permission checks
+    in swapexp, but it still does not resolve the issue.
+
 ===============================================================================
 
 Detailed Control Flow:
