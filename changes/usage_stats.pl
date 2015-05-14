@@ -12,17 +12,9 @@ my $pnodes = $$stats{'nodes'};
 my @keys   = sort { $$projs{$b} <=> $$projs{$a} } keys %{$projs};
 
 # Read quotas for each project and create a hash map
-my($qf, $line, @words, %quotas);
-open($qf, '<', $QUOTA_FILE) or return;
-while($line = <$qf>)  {
-	@words = split(/ /, $line);
+my($qf, $line, @words);
 
-    # Only the first entry in the file is considered as the correct quota
-	$quotas{$words[0]} = $words[1] unless exists $quotas{$words[0]};
-}
-close $qf;
-
-my $quotas1 = get_proj_quota();
+my $quotas = get_proj_quota();
 # get the mapping from pid_idx to pid, needed to display pid
 my $pids = get_pididx_to_pid();
 
@@ -32,8 +24,8 @@ my($pid, $usghrs, $remaining, $num_nodes);
 for my $pidx (@keys) {
 	$pid    = $$pids{$pidx};
 	$usghrs = $$projs{$pidx} / (60 * 60);
-	$quota = $$quotas1{$pid};
-    $quota = $$quotas1{"default"} unless exists $quotas{$pid};
+	$quota = $$quotas{$pid};
+    $quota = $$quotas{"default"} unless exists $$quotas{$pid};
 
     $usghrs = sprintf("%.3f", $usghrs);
 
