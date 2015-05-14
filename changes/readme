@@ -1,0 +1,76 @@
+===============================================================================
+User Visible Changes:
+(1) Free PCs: This count now displays the #of 'free-nodes' and the 'spot-nodes'.
+    Spot Nodes are those which can be freed from the projects which have 
+	exceeded its quota.
+					          
+(2) A New Drop Down (Testbed Status)
+    A new drop down (called 'Testbed Status' is added under 'Experimentation'
+	This basically displays all the projects that are present in the system.
+	The information displayed in a table as follows:
+ 	    <Project Name> <Quota> <Usage> <#pnodes> <Time Left>
+	<Project Name> is the name of the project
+	<Quota> is the assigned quota for the project in pnode-hours 
+	        (rolling 30 days - default if no quota assigned)
+	<Usage> is the pnode-hours usage over the last 30 days
+	<#pnodes> is the total number of pnodes used by all active experiments
+	          in this project
+    <Time Left> Time left (in hours) before the experiments under this project
+	            becomes 'Spot Experiments'
+
+===============================================================================
+
+Front End Changes:
+Modified files - 
+(1) currentusage.php3: Minor change to sum up "Free PCs" and "Spot PCs"
+(2) menu.php3: Minor change to add a new dropdown
+(3) dbdefs.php3: A very crude hack (:-/) done to access perl scripts from php
+
+New Files (All files should be placed under /usr/testbed/www)
+(1) showtestbed_status.php3: Display a new table described in #2 of 
+    User Visible Changes above.
+
+(2) spotpcs.pl and usage_stats.pl: Again a very crude hack to communicate 
+    between perl and php. (Note that this should be placed under 
+	/usr/testbed/www)
+
+===============================================================================
+
+Back End Changes:
+New files to be placed under /usr/testbed/local
+(1) preempt_nodes: Bulk of the functions are here. Makes appropriate queries
+    and policy decisions before pre-empting the experiments. It also has some
+	functions called by front-end to diplay testbed status.
+(2) dbstats: Some functions pulled in from testbed-report scripts. Few changes 
+    made to add additional data.
+
+Modified Files:
+(1) ptopgen: Calls functions in preempt_nodes when a new option is enabled
+(2) mapper: Calls ptopgen with additional options during the third assign_loop
+    with the required number of free nodes
+(3) assign_wrapper2: exitcode is set to 1 on 2 cases so that mapper loop can 
+    proceed
+(4) sched_reserve: Removed the requirement that only admins can reserve the 
+    nodes (might need some careful thought and review)
+
+Quota File:
+(1) proj_quota: A flat text file, should be placed under /usr/testbed
+    One line per project of the form "<project_name><quota>"
+	<quota> is in pnode-hours (for rolling 30 days)
+	A entry containing a default value should be placed
+    Ex: "default 500" means a system wide default quota of 500 pnode-hours
+===============================================================================
+
+Detailed Control Flow:
+- User makes request to swap_in experiments
+- If the assign_loop (in mapper) is not able to find enough free nodes, 
+  ptopgen is called with a new option (-k <num_free_nodes>).
+- When ptopgen is called with -k option, it calls preempt_nodes
+- preempt_nodes will call routines from dbstats to get the project statistics
+- If the expt to be swapped-in is already over quota, then return
+- reserve the nodes used by 'heavy' experiments
+- free the nodes from 'heavy' experiments
+- Kick enough experiments (from only projects which are over quota) so that
+  enough free nodes are made available.
+- Now return. ptopgen will continue to run assign_loop which will succeed now
+
