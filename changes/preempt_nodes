@@ -15,8 +15,7 @@ use Project;
 require "/usr/testbed/local/dbstats";
 
 sub freeable_node_count_projs($);
-sub get_proj_quota($);
-sub get_proj_quota1();
+sub get_proj_quota();
 sub preempt_projs($$$$);
 
 # Gloabl defs
@@ -40,30 +39,13 @@ sub allocd_but_free_nodes() {
     return $freeable_nodes;
 }
 
-sub get_proj_quota($) {
-	my $input_proj = shift;
-    my($line, $qf, @words);
-
-    open($qf, '<', $QUOTA_FILE) or return $maxquota;
-	
-    while($line = <$qf>)  {  
-        @words = split(/ /, $line);
-        if(($words[0]) && ($words[0] eq $input_proj)) {
-			return $words[1];
-		}
-	}
-
-    close $qf;
-	return $maxquota;
-}
-
 #
 # Generate a hash map with pid's as the key and quota as the value
 # Current reads from a file. If schema changes are made later, simply
 # modiy this function to make a DB query and then create the hash map.
 # No other changes needed either in the front end or the backend!
 #
-sub get_proj_quota1() {
+sub get_proj_quota() {
 	my($line, $qf, @words, %quotas, $error);
 	$error = 0;
     open($qf, '<', $QUOTA_FILE) or $error = 1;
@@ -101,7 +83,7 @@ sub freeable_node_count_projs($) {
     $freeable_nodes = 0;
 	$usghrs = 0;
 
-    my $quota = get_proj_quota1();
+    my $quota = get_proj_quota();
     foreach my $pidxs (keys %{$projs}) {
 		$usghrs = $$projs{$pidxs} / (60 * 60);
 		$q = "SELECT distinct pid FROM experiments " .
@@ -111,7 +93,6 @@ sub freeable_node_count_projs($) {
 		$pid = $result->fetchrow_array;
 		next unless $pid;
 
-		# $prj_quota = get_proj_quota($pid);
 		$prj_quota = $$quota{$pid};
 		$prj_quota = $$quota{"default"} unless exists $$quota{$pid};
 
@@ -191,7 +172,7 @@ sub preempt_projs($$$$) {
 	my $proj = $$stats{'u_proj'};
 
     # Get the project quotas for all projects
-	my $quotas = get_proj_quota1();
+	my $quotas = get_proj_quota();
 
     # variables to hold query and its results
 	my($query, $qresult1, $qresult2, $freenodes, $usghrs, $quota, $pidxs);
@@ -206,7 +187,6 @@ sub preempt_projs($$$$) {
         $usghrs   = $$proj{$pidxs} / (60 * 60) if defined $$proj{$pidxs};
 		$quota    = $$quotas{$new_pid};
 		$quota    = $$quotas{"default"} unless exists $$quotas{$new_pid};
-	    # $quota    = get_proj_quota($new_pid);
 
 	    if($usghrs >= $quota) {
             if($dry_run == 1) {
@@ -264,7 +244,6 @@ sub preempt_projs($$$$) {
         # Get the assigned project quota for this 'pid'
 		$prj_quota    = $$quotas{$new_pid};
 		$prj_quota    = $$quotas{"default"} unless exists $$quotas{$new_pid};
-	    # $prj_quota    = get_proj_quota($pid);
 
         # Skip if usage is within quota
 		if($usghrs < $prj_quota) {
