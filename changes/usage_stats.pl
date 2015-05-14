@@ -22,7 +22,7 @@ while($line = <$qf>)  {
 }
 close $qf;
 
-my $quotas1 = get_proj_quota1();
+my $quotas1 = get_proj_quota();
 # get the mapping from pid_idx to pid, needed to display pid
 my $pids = get_pididx_to_pid();
 
