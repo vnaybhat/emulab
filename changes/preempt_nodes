@@ -54,7 +54,7 @@ sub get_proj_quota() {
     # This will ensure that the testbed continues to operate as if
     # pre-emption does not exist
     if($error == 1) {
-        $quotas{"default"} = 999999;
+        $quotas{"default"} = 99999;
 		return \%quotas;
 	}
 
@@ -228,6 +228,7 @@ sub preempt_projs($$$$) {
     # Some more variable declaration
     my($eid, $pid, $teid, $tpid, $nodes, $node_id, $prj_quota);
     $nodes = "";
+    my $pidstab = get_pididx_to_pid();
 
     for $pidxs (@keys) {
         # Extract the project usage hours
@@ -242,7 +243,7 @@ sub preempt_projs($$$$) {
         next unless $pid;
 
         # Get the assigned project quota for this 'pid'
-		$prj_quota    = $$quotas{$new_pid};
+		$prj_quota    = $$quotas{$pid};
 		$prj_quota    = $$quotas{"default"} unless exists $$quotas{$new_pid};
 
         # Skip if usage is within quota

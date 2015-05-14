@@ -408,8 +408,8 @@ function TBFreePCs()
 #
 function TBSpotAvailablePCs()
 {
-	$command = "perl spotpcs.pl";
-	$out = array();
+    $command = "perl spotpcs.pl";
+    $out = array();
     $tmp = exec($command,$out);
 
     return $out[0];
@@ -420,8 +420,8 @@ function TBSpotAvailablePCs()
 #
 function TBPrjUsageStats()
 {
-	$command = "perl usage_stats.pl";
-	$out = array();
+    $command = "perl usage_stats.pl";
+    $out = array();
     $tmp = exec($command,$out);
 
     return $out;
