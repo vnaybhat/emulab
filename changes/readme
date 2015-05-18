@@ -43,6 +43,14 @@ New files to be placed under /usr/testbed/local
 	functions called by front-end to diplay testbed status.
 (2) dbstats: Some functions pulled in from testbed-report scripts. Few changes 
     made to add additional data.
+(3) rootexec.c: A new c file which execs 'idleswap' as effective user id. Note
+    that this should be compiled into a binary named 'rootexec' and placed
+    under the same directory (/usr/testbed/local). This binary should be a 
+    setuid executable and should be owned by an admin account (note that 
+    'root' is not an admin account in emulab). Steps are given below:
+    $> cc rootexec.c -o rootexec
+    $> sudo chown temlab rootexec
+    $> sudo chmod +s rootexec
 
 Modified Files:
 (1) ptopgen: Calls functions in preempt_nodes when a new option is enabled
@@ -53,8 +61,6 @@ Modified Files:
 (4) sched_reserve: Removed the requirement that only admins can reserve the 
     nodes (might need some careful thought and review)
 (5) nfree: Removed the check for user's permission to free nodes
-(6) swapexp: Removed the check for user's permission to muck expt. Still
-    this is not complete and does not solve the bug #1 noted below.
 
 Quota File:
 (1) proj_quota: A flat text file, should be placed under /usr/testbed
@@ -62,6 +68,8 @@ Quota File:
 	<quota> is in pnode-hours (for rolling 30 days)
 	A entry containing a default value should be placed
     Ex: "default 500" means a system wide default quota of 500 pnode-hours
+PS: 'proj_quota' should contain a 'default' entry. Else the behavious may be
+     unpredicatble.
 ===============================================================================
 
 Open Issues and bugs:

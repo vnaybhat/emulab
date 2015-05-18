@@ -287,7 +287,7 @@ sub preempt_projs($$$$) {
                 # Preempt experiments
                 system("$SBIN/sched_reserve $new_pid $new_eid $nodes > /dev/null");
                 system("$BIN/nfree -x $pid $eid -a > /dev/null");
-                system("$BIN/swapexp -s out $pid $eid > /dev/null");
+                system("$TB/local/rootexec $pid,$eid > /dev/null");
 		    }
 
 		    if($freenodes >= $num_nodes) {

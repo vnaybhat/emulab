@@ -48,8 +48,17 @@ foreach ($out as $item) {
     echo "</tr>";
 }
 echo "</table>";
+echo "<br>";
+echo " Quota=Total pnode hours over last 30 day period (sliding window)";
+echo "<br>";
 
-#
+echo "Usage=Total pnode hours used by all experiments under this project over the last 30 days";
+echo "<br>";
+echo "#pnodes=Total number of nodes currently being used by all experiments under this project";
+echo "<br>";
+echo "Time Left=Approximation of when this project might become eligible for pre-emption if it continues to use resources in current state";
+echo "<br>";
+
 # Standard Testbed Footer
 # 
 PAGEFOOTER();
